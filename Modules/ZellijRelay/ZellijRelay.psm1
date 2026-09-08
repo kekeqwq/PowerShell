@@ -24,6 +24,14 @@ function Get-ZellijAlive {
     return [bool](@($raw) | Select-String -SimpleMatch $Name | Where-Object { $_.Line -notmatch 'EXITED' })
 }
 
+function Test-ZellijHasTerminalPane {
+    param([string]$Name)
+    $dump = & (Get-ZellijPath) -s $Name action dump-layout 2>$null | Out-String
+    if (-not $dump) { return $false }
+    $noPlugin = [regex]::Replace($dump, '(?s)plugin\s+[^\n]*(\{.*?\})?', '')
+    return ([regex]::Matches($noPlugin, '(?m)^\s+pane\b')).Count -ge 1
+}
+
 function Install-ZellijRelayTask {
     param([string]$Session)
 
@@ -51,6 +59,10 @@ function Enter-ZellijRelay {
     param([string]$Session = $script:DefaultSession)
 
     if ($env:ZELLIJ -or $env:ZELLIJ_SKIP) { return }
+
+    if ((Get-ZellijAlive $Session) -and -not (Test-ZellijHasTerminalPane $Session)) {
+        & (Get-ZellijPath) delete-session --force $Session 2>$null | Out-Null
+    }
 
     if (-not (Get-ZellijAlive $Session)) {
         Install-ZellijRelayTask -Session $Session

@@ -10,12 +10,15 @@ oh-my-posh init pwsh --config 'catppuccin_mocha' | Invoke-Expression
 
 function Test-ZellijLastTerminalPane {
     if (-not $env:ZELLIJ) { return $false }
-    $dump = & zellij action dump-layout 2>$null | Out-String
+    $name = $env:ZELLIJ_SESSION_NAME
+    $dump = if ($name) {
+        & zellij -s $name action dump-layout 2>$null | Out-String
+    } else {
+        & zellij action dump-layout 2>$null | Out-String
+    }
     if (-not $dump) { return $true }
-    $bare = [regex]::Matches($dump, '(?m)^\s+pane\s*$').Count
-    $named = [regex]::Matches($dump, '(?m)^\s+pane(?! size=1 borderless=true)[^\n{]*$').Count
-    $block = [regex]::Matches($dump, '(?ms)^\s+pane(?! size=1 borderless=true)[^\n]*\{(?!\s*plugin)').Count
-    return (($bare + $named + $block) -le 1)
+    $noPlugin = [regex]::Replace($dump, '(?s)plugin\s+[^\n]*(\{.*?\})?', '')
+    return ([regex]::Matches($noPlugin, '(?m)^\s+pane\b')).Count -le 1
 }
 
 Set-PSReadLineKeyHandler -Chord Ctrl+d -ScriptBlock {
