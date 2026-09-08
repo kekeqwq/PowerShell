@@ -8,7 +8,33 @@ if ($argv | Where-Object { $_ -in '-Command', '-c', '-File' }) { return }
 
 oh-my-posh init pwsh --config 'catppuccin_mocha' | Invoke-Expression
 
-Set-PSReadLineKeyHandler -Chord Ctrl+d -Function DeleteCharOrExit
+function Test-ZellijLastTerminalPane {
+    if (-not $env:ZELLIJ) { return $false }
+    $dump = & zellij action dump-layout 2>$null | Out-String
+    if (-not $dump) { return $true }
+    $bare = [regex]::Matches($dump, '(?m)^\s+pane\s*$').Count
+    $named = [regex]::Matches($dump, '(?m)^\s+pane(?! size=1 borderless=true)[^\n{]*$').Count
+    $block = [regex]::Matches($dump, '(?ms)^\s+pane(?! size=1 borderless=true)[^\n]*\{(?!\s*plugin)').Count
+    return (($bare + $named + $block) -le 1)
+}
+
+Set-PSReadLineKeyHandler -Chord Ctrl+d -ScriptBlock {
+    $line = $null
+    $cursor = $null
+    [Microsoft.PowerShell.PSConsoleReadLine]::GetBufferState([ref]$line, [ref]$cursor)
+    if ($line.Length -gt 0) {
+        [Microsoft.PowerShell.PSConsoleReadLine]::DeleteChar()
+        return
+    }
+    if ($env:ZELLIJ -and (Test-ZellijLastTerminalPane)) {
+        $name = $env:ZELLIJ_SESSION_NAME
+        if ($name) { & zellij delete-session --force $name 2>$null | Out-Null }
+        else { & zellij action quit 2>$null | Out-Null }
+    }
+    [Microsoft.PowerShell.PSConsoleReadLine]::RevertLine()
+    [Microsoft.PowerShell.PSConsoleReadLine]::Insert('exit')
+    [Microsoft.PowerShell.PSConsoleReadLine]::AcceptLine()
+}
 
 $env:SHELL = Join-Path $PSHOME 'pwsh.exe'
 
