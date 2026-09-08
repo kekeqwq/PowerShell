@@ -10,13 +10,21 @@ oh-my-posh init pwsh --config 'catppuccin_mocha' | Invoke-Expression
 
 function Test-ZellijLastTerminalPane {
     if (-not $env:ZELLIJ) { return $false }
+
+    $tabs = @(
+        & zellij action query-tab-names 2>$null |
+            Where-Object { $_ -and $_.Trim() }
+    )
+    if ($tabs.Count -gt 1) { return $false }
+
     $name = $env:ZELLIJ_SESSION_NAME
     $dump = if ($name) {
         & zellij -s $name action dump-layout 2>$null | Out-String
     } else {
         & zellij action dump-layout 2>$null | Out-String
     }
-    if (-not $dump) { return $true }
+    if (-not $dump) { return $false }
+
     $noPlugin = [regex]::Replace($dump, '(?s)plugin\s+[^\n]*(\{.*?\})?', '')
     return ([regex]::Matches($noPlugin, '(?m)^\s+pane\b')).Count -le 1
 }
