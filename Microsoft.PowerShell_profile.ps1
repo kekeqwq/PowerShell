@@ -3,32 +3,49 @@ if ($env:SSH_ORIGINAL_COMMAND) { return }
 
 $env:TERM = 'xterm-256color'
 
+# 1. 快速注入 tmux 原生路径
+$knownTmuxDir = Join-Path $env:LOCALAPPDATA 'Microsoft\WinGet\Packages\marlocarlo.psmux_Microsoft.Winget.Source_8wekyb3d8bbwe'
+if ((Test-Path $knownTmuxDir) -and ($env:PATH -notlike "*$knownTmuxDir*")) {
+    $env:PATH = "$knownTmuxDir;$env:PATH"
+}
+
 $argv = [Environment]::GetCommandLineArgs()
-if ($argv | Where-Object { $_ -in '-Command', '-c', '-File' }) { return }
+if (-not $env:TMUX -and ($argv | Where-Object { $_ -in '-Command', '-c', '-File' })) { return }
 
-# --- 交互环境：ZELLIJ 内外都要加载 ---
+# --- 交互环境：TMUX 内外都要加载 ---
 
-oh-my-posh init pwsh --config 'catppuccin_mocha' | Invoke-Expression
+# 2. oh-my-posh 提速缓存（避免每次启动冷启动 oh-my-posh.exe 耗时 ~600ms）
+$ompCache = Join-Path $env:TEMP 'omp-catppuccin_mocha.ps1'
+$ompExe = (Get-Command oh-my-posh -ErrorAction SilentlyContinue)?.Source
+if ($ompExe -and (Test-Path $ompCache) -and ((Get-Item $ompCache).LastWriteTime -gt (Get-Item $ompExe).LastWriteTime)) {
+    . $ompCache
+} else {
+    oh-my-posh init pwsh --config 'catppuccin_mocha' | Out-File $ompCache -Encoding utf8
+    . $ompCache
+}
 
-function Test-ZellijLastTerminalPane {
-    if (-not $env:ZELLIJ) { return $false }
+function Test-TmuxLastTerminalPane {
+    if (-not $env:TMUX) { return $false }
 
-    $tabs = @(
-        & zellij action query-tab-names 2>$null |
-            Where-Object { $_ -and $_.Trim() }
-    )
-    if ($tabs.Count -gt 1) { return $false }
+    try {
+        # 统计整个 session 中所有的 pane 数量
+        $allPanes = @(
+            & tmux list-panes -s 2>&1 |
+                Where-Object { $_ -and $_ -is [string] -and $_.Trim() }
+        )
+        if ($allPanes.Count -ne 1) { return $false }
 
-    $name = $env:ZELLIJ_SESSION_NAME
-    $dump = if ($name) {
-        & zellij -s $name action dump-layout 2>$null | Out-String
-    } else {
-        & zellij action dump-layout 2>$null | Out-String
+        # 统计整个 session 中所有的 window 数量
+        $windows = @(
+            & tmux list-windows 2>&1 |
+                Where-Object { $_ -and $_ -is [string] -and $_.Trim() }
+        )
+        if ($windows.Count -ne 1) { return $false }
+
+        return $true
+    } catch {
+        return $false
     }
-    if (-not $dump) { return $false }
-
-    $noPlugin = [regex]::Replace($dump, '(?s)plugin\s+[^\n]*(\{.*?\})?', '')
-    return ([regex]::Matches($noPlugin, '(?m)^\s+pane\b')).Count -le 1
 }
 
 Set-PSReadLineKeyHandler -Chord Ctrl+d -ScriptBlock {
@@ -39,21 +56,35 @@ Set-PSReadLineKeyHandler -Chord Ctrl+d -ScriptBlock {
         [Microsoft.PowerShell.PSConsoleReadLine]::DeleteChar()
         return
     }
-    if ($env:ZELLIJ -and (Test-ZellijLastTerminalPane)) {
-        $name = $env:ZELLIJ_SESSION_NAME
-        if ($name) { & zellij delete-session --force $name 2>$null | Out-Null }
-        else { & zellij action quit 2>$null | Out-Null }
+    if ($env:TMUX -and (Test-TmuxLastTerminalPane)) {
+        & tmux kill-session 2>$null | Out-Null
     }
     [Microsoft.PowerShell.PSConsoleReadLine]::RevertLine()
     [Microsoft.PowerShell.PSConsoleReadLine]::Insert('exit')
     [Microsoft.PowerShell.PSConsoleReadLine]::AcceptLine()
 }
 
+# 类似 fish 的历史命令浅色预测提示与补全（支持右箭头直接补全整句，Ctrl+f 亦可补全）
+if ($Host.UI.RawUI) {
+    try {
+        Set-PSReadLineOption -PredictionSource HistoryAndPlugin
+        Set-PSReadLineOption -PredictionViewStyle InlineView
+        Set-PSReadLineKeyHandler -Chord 'Ctrl+f' -Function ForwardChar
+    } catch {
+        try {
+            Set-PSReadLineOption -PredictionSource History
+            Set-PSReadLineOption -PredictionViewStyle InlineView
+            Set-PSReadLineKeyHandler -Chord 'Ctrl+f' -Function ForwardChar
+        } catch {}
+    }
+}
+
 $env:SHELL = Join-Path $PSHOME 'pwsh.exe'
 
-Import-Module WallpaperTools
-Import-Module MiscTools
-Import-Module ZellijRelay -Force
+# WallpaperTools 和 MiscTools 通过 PowerShell 的 Module Auto-Loading 自动按需加载
+# 无需在 Profile 启动时同步导入，节省启动耗时
+
+Import-Module TmuxRelay
 
 function Set-All-Alias {
     Set-Alias -Scope Global -Name op -Value Open-Explorer
@@ -69,18 +100,15 @@ function Set-All-Alias {
 
 Set-All-Alias
 
-# 1. Get the current User PATH
-$oldPath = [Environment]::GetEnvironmentVariable("Path", "User")
+# PATH 进程内补充（去重且不写注册表）
+$extraPaths = @('C:\Users\keke\Downloads\emacs\bin', 'C:\msys64\clangarm64\bin')
+foreach ($p in $extraPaths) {
+    if ((Test-Path $p) -and ($env:PATH -notlike "*$p*")) {
+        $env:PATH = "$p;$env:PATH"
+    }
+}
 
-# 2. Append the new folder
-$newPath = $oldPath + ";C:\Users\keke\Downloads\emacs\bin;C:\msys64\clangarm64\bin"
-
-# 3. Save it back to the environment
-[Environment]::SetEnvironmentVariable("Path", $newPath, "User")
-
-
-# 只在「还没进 Zellij」时 attach；不要用 TERM 短路上面的函数
-#
-if (-not $env:ZELLIJ -and -not $env:SSH_ORIGINAL_COMMAND -and -not $env:ZELLIJ_SKIP) {
-    Enter-ZellijRelay
+# 只在「还没进 TMUX」时 attach；不要用 TERM 短路上面的函数
+if (-not $env:TMUX -and -not $env:SSH_ORIGINAL_COMMAND -and -not $env:TMUX_SKIP) {
+    Enter-TmuxRelay
 }

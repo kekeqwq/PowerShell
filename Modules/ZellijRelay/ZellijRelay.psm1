@@ -48,7 +48,7 @@ function Install-ZellijRelayTask {
     $zellij  = Get-ZellijPath
     $user    = "$env:COMPUTERNAME\$env:USERNAME"
     $homeDir = $HOME
-    $arg     = "-NoProfile -WindowStyle Hidden -Command `"Set-Location '$homeDir'; & '$zellij' attach --create-background $Session options --default-shell '$pwsh'`""
+    $arg     = "-NoProfile -WindowStyle Hidden -Command `"Set-Location '$homeDir'; `$env:TERM = 'xterm-256color'; & '$zellij' attach --create-background $Session options --default-shell '$pwsh'`""
 
     $action = New-ScheduledTaskAction -Execute $pwsh -Argument $arg -WorkingDirectory $homeDir
     $prin   = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
@@ -80,6 +80,7 @@ function Enter-ZellijRelay {
         }
     }
 
+    $env:TERM = 'xterm-256color'
     & (Get-ZellijPath) attach $Session
 }
 
