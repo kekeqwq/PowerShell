@@ -99,30 +99,40 @@ function Enter-TmuxRelay {
     if ($env:TMUX -or $env:TMUX_SKIP) { return }
 
     if (-not (Get-TmuxAlive $Session)) {
-        # 优化：先尝试直接触发已存在的计划任务（40ms），若任务不存在再走慢速注册逻辑
-        $run = schtasks.exe /run /tn $script:TaskName 2>&1
-        if ($LASTEXITCODE -ne 0) {
-            Install-TmuxRelayTask -Session $Session
+        # 1. 尝试通过桌面计划任务（TmuxSpawnOnce）挂载到物理控制台会话
+        $spawnOk = $false
+        try {
             $run = schtasks.exe /run /tn $script:TaskName 2>&1
             if ($LASTEXITCODE -ne 0) {
-                throw "schtasks /run failed: $run"
+                Install-TmuxRelayTask -Session $Session
+                $run = schtasks.exe /run /tn $script:TaskName 2>&1
             }
-        }
+            if ($LASTEXITCODE -eq 0) {
+                foreach ($i in 1..25) {
+                    Start-Sleep -Milliseconds 100
+                    if (Get-TmuxAlive $Session) { $spawnOk = $true; break }
+                }
+            }
+        } catch {}
 
-        # 毫秒级轮询（100ms 步长，响应更快）
-        $ok = $false
-        foreach ($i in 1..40) {
-            Start-Sleep -Milliseconds 100
-            if (Get-TmuxAlive $Session) { $ok = $true; break }
-        }
-        if (-not $ok) {
-            throw "TmuxSpawnOnce ran but session '$Session' did not appear"
+        # 2. 容错降级：若系统刚重启、物理桌面尚未登录（console 未处于活跃状态），交互式计划任务无法拉起，
+        # 则直接在后台拉起当前用户的 Tmux 会话，绝不抛出异常断开 SSH 连接！
+        if (-not $spawnOk -and -not (Get-TmuxAlive $Session)) {
+            $pwsh = Get-PwshPath
+            $tmux = Get-TmuxPath
+            try {
+                & $tmux new-session -d -s $Session $pwsh 2>&1 | Out-Null
+            } catch {}
         }
     }
 
     $env:TERM = 'xterm-256color'
-    & (Get-TmuxPath) attach-session -t $Session
-    # 退出 tmux 会话时，顺带关闭 SSH 外层外壳，不掉落到非 relay 环境
+    try {
+        & (Get-TmuxPath) attach-session -t $Session
+    } catch {
+        Write-Warning "[-] Tmux attach 异常，回退至原生 PowerShell 会话。"
+        return
+    }
     exit
 }
 

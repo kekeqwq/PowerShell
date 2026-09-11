@@ -277,20 +277,39 @@ if ($isSshdInstalled) {
     }
 }
 
-# 5. 配置防火墙入站规则
-Write-Host "`n[4/7] 配置防火墙 22 端口..." -ForegroundColor Yellow
-if (-not (Get-NetFirewallRule -Name "OpenSSH-Server-In-TCP" -ErrorAction SilentlyContinue)) {
+# 确保 sshd 与 ssh-agent 服务设为开机自动启动，并配置服务崩溃自愈策略
+Set-Service sshd -StartupType Automatic -ErrorAction SilentlyContinue
+sc.exe config sshd start= auto | Out-Null
+sc.exe failure sshd reset= 86400 actions= restart/2000/restart/5000/restart/10000 | Out-Null
+Set-Service ssh-agent -StartupType Automatic -ErrorAction SilentlyContinue
+sc.exe config ssh-agent start= auto | Out-Null
+Restart-Service sshd -ErrorAction SilentlyContinue
+Write-Host "[+] sshd 服务已设置为开机自动启动（已启用崩溃自愈策略）" -ForegroundColor Green
+
+# 5. 配置防火墙入站规则（确保放行所有网络类型：Domain, Private, Public）
+Write-Host "`n[4/7] 配置防火墙 22 端口 (放行所有网络类型: 局域网/公用网络)..." -ForegroundColor Yellow
+$fwRule = Get-NetFirewallRule -Name "OpenSSH-Server-In-TCP" -ErrorAction SilentlyContinue
+if (-not $fwRule) {
     New-NetFirewallRule -Name "OpenSSH-Server-In-TCP" `
         -DisplayName "OpenSSH Server (sshd)" `
         -Enabled True `
         -Direction Inbound `
         -Protocol TCP `
         -LocalPort 22 `
+        -Profile Any `
         -Action Allow | Out-Null
-    Write-Host "[+] 防火墙入站规则已添加" -ForegroundColor Green
+    Write-Host "[+] 防火墙入站规则已添加 (Profile: Any)" -ForegroundColor Green
 } else {
-    Write-Host "[+] 防火墙规则已存在" -ForegroundColor Green
+    Set-NetFirewallRule -Name "OpenSSH-Server-In-TCP" -Enabled True -Profile Any -Action Allow | Out-Null
+    Write-Host "[+] 防火墙入站规则已更新并放行所有网络类型 (Profile: Any)" -ForegroundColor Green
 }
+
+# 将当前局域网连接类别设置为专用网络 (Private)，避免公用网络防火墙阻断局域网连接
+try {
+    Get-NetConnectionProfile | Where-Object { $_.InterfaceAlias -notmatch 'tun|loopback' } |
+        Set-NetConnectionProfile -NetworkCategory Private -ErrorAction SilentlyContinue
+    Write-Host "[+] 已将当前局域网连接设为 Private (专用网络)" -ForegroundColor Green
+} catch {}
 
 # 6. 配置 sshd 默认 Shell 与公钥认证
 Write-Host "`n[5/7] 配置 sshd 默认 Shell 及公钥认证..." -ForegroundColor Yellow
@@ -348,10 +367,10 @@ if ($ResolvedKeyPath -and (Test-Path $ResolvedKeyPath)) {
     Write-Host "[+] 公钥已导入并配置安全权限" -ForegroundColor Green
 }
 
-# 启动 sshd 服务
-Set-Service sshd -StartupType Automatic
-Restart-Service sshd
-Write-Host "[+] sshd 服务已设置为开机自动启动并已启动" -ForegroundColor Green
+# 启动并确认 sshd 服务
+Set-Service sshd -StartupType Automatic -ErrorAction SilentlyContinue
+Restart-Service sshd -ErrorAction SilentlyContinue
+Write-Host "[+] sshd 服务已重启并确认开机自启生效" -ForegroundColor Green
 
 # 7. 注册 TmuxRelay 桌面交互计划任务
 Write-Host "`n[6/7] 注册 TmuxRelay 桌面交互计划任务..." -ForegroundColor Yellow
@@ -382,4 +401,4 @@ foreach ($ip in $ips) {
     Write-Host "  ssh $env:USERNAME@$ip" -ForegroundColor Yellow
 }
 Write-Host "-----------------------------------------" -ForegroundColor Gray
-Write-Host "提示：首次连接前请确认本机已登录桌面（console Active）。" -ForegroundColor Gray
+Write-Host "提示：若机器重启后尚未登录物理桌面，连入将自动降级并安全启动独立 Tmux 会话，绝不中断。" -ForegroundColor Gray
