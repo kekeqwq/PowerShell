@@ -1,8 +1,10 @@
-# scp / sftp / ssh host <command>：整文件退出，禁止任何输出
+# scp / sftp / ssh host <command>：非交互式调用整文件立即退出，禁止任何输出
 if ($env:SSH_ORIGINAL_COMMAND) { return }
 
 $argv = [Environment]::GetCommandLineArgs()
-if ($argv | Where-Object { $_ -in '-Command', '-c', '/c', '-File' }) { return }
+if (($argv | Where-Object { $_ -in '-Command', '-c', '/c', '-File' }) -and ($argv -notcontains '-NoExit')) {
+    return
+}
 
 $env:TERM = 'xterm-256color'
 $env:PSMUX_FORCE_MOUSE = '0'
