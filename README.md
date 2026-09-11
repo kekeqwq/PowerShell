@@ -55,18 +55,18 @@ Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned -Force
 
 运行脚本后，将全自动完成以下所有配置：
 
-1. **PowerShell 7+ 环境识别与容错安装**：
-   - 自动检测系统现有 PowerShell 7+ 环境（PATH、标准安装路径、`~/Downloads/pwsh` 绿色版）；
-   - 若系统中未安装，将优先从微软官方发布源直接获取最新 Preview 绿色版解压至 `~/Downloads/pwsh`；
-   - 若下载受阻，自动回退并通过 WinGet 安装官方稳定版（`Microsoft.PowerShell`）或预览版；
-   - 支持在执行时添加 `-InstallPreview` 参数强制下载/更新 Preview 版本。
+1. **PowerShell Preview 下载部署（写死预览版）**：
+   - 自动识别系统架构（ARM64 / x64）；
+   - 严格绑定官方最新 Preview 版本，从官方发布源直接获取绿色 ZIP 包解压至 `~/Downloads/pwsh`；
+   - 若本地已是最新 Preview 版本则自动跳过重复下载，避免冗余消耗。
 2. **依赖组件静默安装**：
    - 通过 WinGet 自动安装 `marlocarlo.psmux` (Windows 原生 Tmux 移植版)；
    - 通过 WinGet 自动安装 `JanDeDobbeleer.OhMyPosh` 提示符工具。
-3. **OpenSSH Server 服务容错配置**：
-   - 优先通过 WinGet 官方包 / GitHub 官方 MSI 独立安装，并以 DISM 镜像功能作为底线回退，保障跨版本 Windows 11（包括 Canary/Dev）皆可秒级装妥；
+3. **OpenSSH Server 服务跨系统容错配置**：
+   - **Windows 正式版系统**（如 21H2 / 22H2 / 23H2 / 24H2 / Win10）：优先调用系统原生 `OpenSSH.Server` 系统功能（FoD），并支持 WinGet / 官方独立 MSI 兜底；
+   - **Windows Insider 预览版系统**（如 Dev / Canary 分支）：智能规避 DISM 云端 FoD 缺失挂起缺陷，直接通过 WinGet / 官方独立 MSI 安装，带实时下载进度；
    - 防火墙自动放行 TCP 22 端口入站连接；
-   - 修改注册表 `HKLM:\SOFTWARE\OpenSSH` 的 `DefaultShell`，无缝指向所选 `pwsh.exe`；
+   - 修改注册表 `HKLM:\SOFTWARE\OpenSSH` 的 `DefaultShell`，硬编码指定为 `~/Downloads/pwsh/pwsh.exe`；
    - 优化 `sshd_config`（解除管理员组公钥重定向限制，支持全局读取 `~/.ssh/authorized_keys`）；
    - 导入公钥并设置规范严苛的 Windows ACL 安全权限。
 4. **桌面挂载计划任务就绪 (TmuxRelay)**：

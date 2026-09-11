@@ -43,28 +43,19 @@ function Get-TmuxPath {
 }
 
 function Get-PwshPath {
+    $previewPwsh = Join-Path $HOME 'Downloads\pwsh\pwsh.exe'
+    if (Test-Path $previewPwsh) { return $previewPwsh }
+
     try {
         $regDefault = (Get-ItemProperty -Path 'HKLM:\SOFTWARE\OpenSSH' -Name 'DefaultShell' -ErrorAction SilentlyContinue).DefaultShell
         if ($regDefault -and (Test-Path $regDefault)) { return $regDefault }
     } catch {}
 
-    $pwshCmd = Get-Command pwsh -ErrorAction SilentlyContinue
-    $pwshFromPath = if ($pwshCmd) { $pwshCmd.Source } else { $null }
-    $candidates = @(
-        $pwshFromPath,
-        (Join-Path $HOME 'Downloads\pwsh\pwsh.exe'),
-        'C:\Program Files\PowerShell\7\pwsh.exe',
-        'C:\Program Files\PowerShell\7-preview\pwsh.exe',
-        (Join-Path $env:LOCALAPPDATA 'Microsoft\PowerShell\pwsh.exe')
-    )
-    foreach ($c in $candidates) {
-        if ($c -and (Test-Path $c)) { return $c }
-    }
     $currProc = Get-Process -Id $PID -ErrorAction SilentlyContinue
     if ($currProc -and $currProc.ProcessName -match 'pwsh' -and (Test-Path $currProc.Path)) {
         return $currProc.Path
     }
-    throw 'pwsh.exe not found'
+    throw "Preview pwsh.exe not found at $previewPwsh"
 }
 
 function Get-TmuxAlive {
