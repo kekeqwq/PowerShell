@@ -55,26 +55,24 @@ Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned -Force
 
 运行脚本后，将全自动完成以下所有配置：
 
-1. **PowerShell Preview 下载部署**：
-   - 自动识别系统架构（ARM64 / x64）；
-   - 从微软官方发布源直接获取最新 Preview 版本（无需鉴权，不触发 GitHub API 速率限制）；
-   - 下载 ZIP 绿色包并解压部署到 `~/Downloads/pwsh`。
+1. **PowerShell 7+ 环境识别与容错安装**：
+   - 自动检测系统现有 PowerShell 7+ 环境（PATH、标准安装路径、`~/Downloads/pwsh` 绿色版）；
+   - 若系统中未安装，将优先从微软官方发布源直接获取最新 Preview 绿色版解压至 `~/Downloads/pwsh`；
+   - 若下载受阻，自动回退并通过 WinGet 安装官方稳定版（`Microsoft.PowerShell`）或预览版；
+   - 支持在执行时添加 `-InstallPreview` 参数强制下载/更新 Preview 版本。
 2. **依赖组件静默安装**：
-   - 通过 WinGet 自动安装 `marlocarlo.psmux` (Windows 原生 Tmux)；
+   - 通过 WinGet 自动安装 `marlocarlo.psmux` (Windows 原生 Tmux 移植版)；
    - 通过 WinGet 自动安装 `JanDeDobbeleer.OhMyPosh` 提示符工具。
-3. **OpenSSH Server 服务配置**：
-   - 安装 `OpenSSH.Server` 系统功能并设为开机自启；
-   - 防火墙放行 TCP 22 端口入站连接；
-   - 修改注册表 `HKLM:\SOFTWARE\OpenSSH` 的 `DefaultShell`，指定为 `~/Downloads/pwsh/pwsh.exe`；
+3. **OpenSSH Server 服务容错配置**：
+   - 优先通过 WinGet 官方包 / GitHub 官方 MSI 独立安装，并以 DISM 镜像功能作为底线回退，保障跨版本 Windows 11（包括 Canary/Dev）皆可秒级装妥；
+   - 防火墙自动放行 TCP 22 端口入站连接；
+   - 修改注册表 `HKLM:\SOFTWARE\OpenSSH` 的 `DefaultShell`，无缝指向所选 `pwsh.exe`；
    - 优化 `sshd_config`（解除管理员组公钥重定向限制，支持全局读取 `~/.ssh/authorized_keys`）；
-   - 导入公钥并设置规范的 Windows ACL 权限。
-4. **Tmux / psmux 配置文件部署**：
-   - 将移植自 Omarchy 的 Catppuccin 主题部署至 `~/.tmux.conf`、`~/.psmux.conf`；
-   - 配置 `set -g allow-predictions on`（启用类似 fish 的浅色历史预测与右箭头补全）；
-   - 配置 `set -g mouse off`（避免 Windows ConPTY 在 SSH 模式下产生 `35;xx;xxM` 鼠标转义字符泄漏）。
-5. **桌面挂载计划任务就绪**：
-   - 导入 `TmuxRelay` 模块并预注册 `TmuxRelay-main` 交互式桌面计划任务；
-   - 确保从远端 SSH 连入时直接穿透进本地桌面的 Session，具备完整的图形桌面令牌、GPU 加速与交互权限。
+   - 导入公钥并设置规范严苛的 Windows ACL 安全权限。
+4. **桌面挂载计划任务就绪 (TmuxRelay)**：
+   - 导入 `TmuxRelay` 模块并注册 `TmuxRelay-main` 交互式桌面计划任务；
+   - 确保从远端 SSH 连入时直接穿透进本地交互式桌面的 Session，具备完整的图形桌面令牌、GPU 加速与交互权限；
+   - 本仓库保持纯粹的 PowerShell 身份，不硬编码外部 tmux 配置文件，连入后可自由配置个人专属 `~/.tmux.conf`。
 
 ---
 

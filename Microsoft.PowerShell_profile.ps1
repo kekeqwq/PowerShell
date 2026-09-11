@@ -20,9 +20,9 @@ if (-not $env:TMUX -and ($argv | Where-Object { $_ -in '-Command', '-c', '-File'
 
 # --- 交互环境：TMUX 内外都要加载 ---
 
-# 2. oh-my-posh 提速缓存（避免每次启动冷启动 oh-my-posh.exe 耗时 ~600ms）
 $ompCache = Join-Path $env:TEMP 'omp-catppuccin_mocha.ps1'
-$ompExe = (Get-Command oh-my-posh -ErrorAction SilentlyContinue)?.Source
+$ompCmd = Get-Command oh-my-posh -ErrorAction SilentlyContinue
+$ompExe = if ($ompCmd) { $ompCmd.Source } else { $null }
 if ($ompExe -and (Test-Path $ompCache) -and ((Get-Item $ompCache).LastWriteTime -gt (Get-Item $ompExe).LastWriteTime)) {
     . $ompCache
 } else {

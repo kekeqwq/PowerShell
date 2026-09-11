@@ -3,7 +3,9 @@ param(
     [Parameter(Position = 0)]
     [string]$AuthorizedKeysPath,
 
-    [switch]$SkipAdminCheck
+    [switch]$SkipAdminCheck,
+    [switch]$InstallPreview,
+    [string]$CustomPwshPath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -60,6 +62,50 @@ function Resolve-KeyPath {
     return $null
 }
 
+# 查找系统中可用的 PowerShell 7+ 解释器（Preview、稳定版、PATH 或安装目录）
+function Find-Pwsh {
+    if ($CustomPwshPath -and (Test-Path $CustomPwshPath)) {
+        return [System.IO.Path]::GetFullPath($CustomPwshPath)
+    }
+
+    # 1. 注册表登记的 OpenSSH DefaultShell
+    try {
+        $regPwsh = (Get-ItemProperty -Path 'HKLM:\SOFTWARE\OpenSSH' -Name 'DefaultShell' -ErrorAction SilentlyContinue).DefaultShell
+        if ($regPwsh -and (Test-Path $regPwsh)) {
+            return [System.IO.Path]::GetFullPath($regPwsh)
+        }
+    } catch {}
+
+    # 2. 系统 PATH 中的 pwsh
+    $pwshCmd = Get-Command pwsh -ErrorAction SilentlyContinue
+    if ($pwshCmd -and (Test-Path $pwshCmd.Source)) {
+        return [System.IO.Path]::GetFullPath($pwshCmd.Source)
+    }
+
+    # 3. 常见候选路径 (Downloads 绿色版、Program Files 稳定版、Program Files 预览版、Local AppData)
+    $candidates = @(
+        (Join-Path $HOME "Downloads\pwsh\pwsh.exe"),
+        "C:\Program Files\PowerShell\7\pwsh.exe",
+        "C:\Program Files\PowerShell\7-preview\pwsh.exe",
+        (Join-Path $env:LOCALAPPDATA "Microsoft\PowerShell\pwsh.exe")
+    )
+    foreach ($c in $candidates) {
+        if ($c -and (Test-Path $c)) {
+            return [System.IO.Path]::GetFullPath($c)
+        }
+    }
+
+    # 4. 当前运行中的进程
+    try {
+        $proc = Get-Process -Id $PID -ErrorAction SilentlyContinue
+        if ($proc -and $proc.ProcessName -match 'pwsh' -and (Test-Path $proc.Path)) {
+            return [System.IO.Path]::GetFullPath($proc.Path)
+        }
+    } catch {}
+
+    return $null
+}
+
 $ResolvedKeyPath = Resolve-KeyPath -Path $AuthorizedKeysPath
 
 # 1. 确保以管理员权限运行
@@ -74,6 +120,12 @@ if (-not $isAdmin -and -not $SkipAdminCheck) {
     $argList = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $escapedScript)
     if ($ResolvedKeyPath) {
         $argList += "`"$ResolvedKeyPath`""
+    }
+    if ($InstallPreview) {
+        $argList += "-InstallPreview"
+    }
+    if ($CustomPwshPath) {
+        $argList += @("-CustomPwshPath", "`"$CustomPwshPath`"")
     }
     try {
         $p = Start-Process -FilePath $callerExe -ArgumentList $argList -Verb RunAs -PassThru -Wait
@@ -95,47 +147,100 @@ if ($ResolvedKeyPath -and (Test-Path $ResolvedKeyPath)) {
     Write-Warning "[-] 未找到公钥文件，稍后需手动配置 ~/.ssh/authorized_keys"
 }
 
-# 2. 下载/更新最新的 Preview 版 PowerShell 到 ~/Downloads/pwsh
-Write-Host "`n[1/7] 检查/下载最新的 Preview 版 PowerShell..." -ForegroundColor Yellow
+# 2. 检查与配置 PowerShell (容错支持：Preview 版、稳定版、现有环境)
+Write-Host "`n[1/7] 检查 PowerShell 运行环境..." -ForegroundColor Yellow
 $isArm64 = ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') -or
            ([System.Environment]::GetEnvironmentVariable('PROCESSOR_ARCHITEW6432') -eq 'ARM64')
 $arch = if ($isArm64) { 'arm64' } else { 'x64' }
 $targetPwshDir = Join-Path $HOME "Downloads\pwsh"
 $targetPwshExe = Join-Path $targetPwshDir "pwsh.exe"
 
-try {
-    # 通过 aka.ms 获取最新 preview release 重定向标签（避免 GitHub API 速率限制）
-    $httpClient = [System.Net.Http.HttpClient]::new()
-    $resp = $httpClient.GetAsync("https://aka.ms/powershell-release?tag=preview").Result
-    $tag = $resp.RequestMessage.RequestUri.Segments[-1].TrimEnd('/')
-    $version = $tag.TrimStart('v')
-    Write-Host "[+] 官方最新 Preview 版本: $tag ($arch)" -ForegroundColor Green
+$currentPwsh = Find-Pwsh
+if ($currentPwsh -and -not $InstallPreview) {
+    $currVer = (& $currentPwsh --version 2>$null)
+    Write-Host "[+] 检测到当前已有可用 PowerShell: $currentPwsh ($currVer)" -ForegroundColor Green
+    Write-Host "    (若需强制下载更新 Preview 版，可在执行时附加 -InstallPreview 参数)" -ForegroundColor Gray
+} else {
+    if ($InstallPreview) {
+        Write-Host "[*] 已指定 -InstallPreview，准备下载/更新最新 Preview 版 PowerShell..." -ForegroundColor Cyan
+    } else {
+        Write-Host "[*] 系统中未检测到 PowerShell 7+，开始自动安装..." -ForegroundColor Cyan
+    }
 
-    $needDownload = $true
-    if (Test-Path $targetPwshExe) {
-        $currVer = (& $targetPwshExe --version 2>$null) -replace 'PowerShell\s*', ''
-        if ($currVer -like "*$version*") {
-            Write-Host "[+] 当前 $targetPwshExe 已是最新版 ($currVer)，跳过下载" -ForegroundColor Green
-            $needDownload = $false
+    $installedPwsh = $false
+
+    # 尝试方案 1: 下载微软官方 Preview 绿色版到 ~/Downloads/pwsh
+    try {
+        $httpClient = [System.Net.Http.HttpClient]::new()
+        $resp = $httpClient.GetAsync("https://aka.ms/powershell-release?tag=preview").Result
+        $tag = $resp.RequestMessage.RequestUri.Segments[-1].TrimEnd('/')
+        $version = $tag.TrimStart('v')
+        Write-Host "[+] 官方最新 Preview 版本: $tag ($arch)" -ForegroundColor Green
+
+        $needDownload = $true
+        if (Test-Path $targetPwshExe) {
+            $currVer = (& $targetPwshExe --version 2>$null) -replace 'PowerShell\s*', ''
+            if ($currVer -like "*$version*") {
+                Write-Host "[+] 当前 $targetPwshExe 已是最新版 ($currVer)，跳过下载" -ForegroundColor Green
+                $needDownload = $false
+                $installedPwsh = $true
+            }
+        }
+
+        if ($needDownload) {
+            $zipUrl = "https://github.com/PowerShell/PowerShell/releases/download/$tag/PowerShell-$version-win-$arch.zip"
+            $tempZip = Join-Path $env:TEMP "PowerShell-$version-win-$arch.zip"
+            Write-Host "[*] 正在下载 $zipUrl ..." -ForegroundColor Cyan
+            Invoke-WebRequest -Uri $zipUrl -OutFile $tempZip -UseBasicParsing
+
+            if (-not (Test-Path $targetPwshDir)) {
+                New-Item -Path $targetPwshDir -ItemType Directory -Force | Out-Null
+            }
+            Write-Host "[*] 正在解压到 $targetPwshDir ..." -ForegroundColor Cyan
+            Expand-Archive -Path $tempZip -DestinationPath $targetPwshDir -Force
+            Remove-Item $tempZip -Force -ErrorAction SilentlyContinue
+            Write-Host "[+] PowerShell Preview 安装完成" -ForegroundColor Green
+            $installedPwsh = $true
+        }
+    } catch {
+        Write-Warning "[-] Preview 版直接下载失败: $_"
+    }
+
+    # 尝试方案 2: 若 Preview 下载失败且系统尚无 pwsh，通过 WinGet 安装稳定版 Microsoft.PowerShell
+    if (-not $installedPwsh -and -not (Find-Pwsh)) {
+        try {
+            Write-Host "[*] 正在尝试通过 WinGet 安装标准稳定版 PowerShell..." -ForegroundColor Cyan
+            & winget install --id Microsoft.PowerShell -e --source winget --accept-source-agreements --accept-package-agreements --silent
+            if ($LASTEXITCODE -eq 0 -or (Find-Pwsh)) {
+                Write-Host "[+] WinGet 稳定版 PowerShell 安装完成" -ForegroundColor Green
+                $installedPwsh = $true
+            }
+        } catch {
+            Write-Warning "[-] WinGet 安装稳定版失败: $_"
         }
     }
 
-    if ($needDownload) {
-        $zipUrl = "https://github.com/PowerShell/PowerShell/releases/download/$tag/PowerShell-$version-win-$arch.zip"
-        $tempZip = Join-Path $env:TEMP "PowerShell-$version-win-$arch.zip"
-        Write-Host "[*] 正在下载 $zipUrl ..." -ForegroundColor Cyan
-        Invoke-WebRequest -Uri $zipUrl -OutFile $tempZip -UseBasicParsing
-
-        if (-not (Test-Path $targetPwshDir)) {
-            New-Item -Path $targetPwshDir -ItemType Directory -Force | Out-Null
+    # 尝试方案 3: 若稳定版也失败，尝试通过 WinGet 安装 Preview 版
+    if (-not $installedPwsh -and -not (Find-Pwsh)) {
+        try {
+            Write-Host "[*] 正在尝试通过 WinGet 安装 Preview 版 PowerShell..." -ForegroundColor Cyan
+            & winget install --id Microsoft.PowerShell.Preview -e --source winget --accept-source-agreements --accept-package-agreements --silent
+            if ($LASTEXITCODE -eq 0 -or (Find-Pwsh)) {
+                Write-Host "[+] WinGet Preview 版 PowerShell 安装完成" -ForegroundColor Green
+                $installedPwsh = $true
+            }
+        } catch {
+            Write-Warning "[-] WinGet 安装 Preview 版失败: $_"
         }
-        Write-Host "[*] 正在解压到 $targetPwshDir ..." -ForegroundColor Cyan
-        Expand-Archive -Path $tempZip -DestinationPath $targetPwshDir -Force
-        Remove-Item $tempZip -Force -ErrorAction SilentlyContinue
-        Write-Host "[+] PowerShell Preview 安装完成" -ForegroundColor Green
     }
-} catch {
-    Write-Warning "[-] 自动下载最新 Preview 版失败: $_。将使用系统现有 PowerShell"
+
+    $finalCheck = Find-Pwsh
+    if ($finalCheck) {
+        $v = (& $finalCheck --version 2>$null)
+        Write-Host "[+] PowerShell 环境就绪: $finalCheck ($v)" -ForegroundColor Green
+    } else {
+        Write-Warning "[-] 自动安装 PowerShell 7+ 未成功，稍后可手动安装或由系统继续使用老版本 PowerShell"
+    }
 }
 
 # 3. 安装其余依赖 (psmux, oh-my-posh)
@@ -253,12 +358,7 @@ if (-not (Get-NetFirewallRule -Name "OpenSSH-Server-In-TCP" -ErrorAction Silentl
 
 # 6. 配置 sshd 默认 Shell 与公钥认证
 Write-Host "`n[5/7] 配置 sshd 默认 Shell 及公钥认证..." -ForegroundColor Yellow
-$finalPwsh = if (Test-Path $targetPwshExe) {
-    $targetPwshExe
-} else {
-    $c = Get-Command pwsh -ErrorAction SilentlyContinue
-    if ($c) { $c.Source }
-}
+$finalPwsh = Find-Pwsh
 
 if ($finalPwsh) {
     if (-not (Test-Path "HKLM:\SOFTWARE\OpenSSH")) {
@@ -266,6 +366,8 @@ if ($finalPwsh) {
     }
     New-ItemProperty -Path "HKLM:\SOFTWARE\OpenSSH" -Name "DefaultShell" -Value $finalPwsh -PropertyType String -Force | Out-Null
     Write-Host "[+] OpenSSH DefaultShell 已设置为: $finalPwsh" -ForegroundColor Green
+} else {
+    Write-Warning "[-] 未检测到 PowerShell 7+，DefaultShell 将保留系统默认 Shell"
 }
 
 # 修正 sshd_config，允许管理员账户正常读取 ~/.ssh/authorized_keys
@@ -317,22 +419,8 @@ Set-Service sshd -StartupType Automatic
 Restart-Service sshd
 Write-Host "[+] sshd 服务已设置为开机自动启动并已启动" -ForegroundColor Green
 
-# 7. 部署 Tmux 配置与中转计划任务
-Write-Host "`n[6/7] 部署 Tmux 配置与桌面挂载计划任务..." -ForegroundColor Yellow
-$tmuxSource = Join-Path $PSScriptRoot "tmux.conf"
-if (Test-Path $tmuxSource) {
-    Copy-Item $tmuxSource (Join-Path $HOME ".tmux.conf") -Force
-    Copy-Item $tmuxSource (Join-Path $HOME ".psmux.conf") -Force
-    $tmuxCfgDir = Join-Path $HOME ".config\tmux"
-    $psmuxCfgDir = Join-Path $HOME ".config\psmux"
-    if (-not (Test-Path $tmuxCfgDir)) { New-Item $tmuxCfgDir -ItemType Directory -Force | Out-Null }
-    if (-not (Test-Path $psmuxCfgDir)) { New-Item $psmuxCfgDir -ItemType Directory -Force | Out-Null }
-    Copy-Item $tmuxSource (Join-Path $tmuxCfgDir "tmux.conf") -Force
-    Copy-Item $tmuxSource (Join-Path $psmuxCfgDir "psmux.conf") -Force
-    Write-Host "[+] Tmux/psmux 配置文件已部署" -ForegroundColor Green
-}
-
-# 预注册 TmuxRelay-main 桌面计划任务
+# 7. 注册 TmuxRelay 桌面交互计划任务
+Write-Host "`n[6/7] 注册 TmuxRelay 桌面交互计划任务..." -ForegroundColor Yellow
 $modulePath = Join-Path $PSScriptRoot "Modules\TmuxRelay\TmuxRelay.psd1"
 if (Test-Path $modulePath) {
     Import-Module $modulePath -Force
