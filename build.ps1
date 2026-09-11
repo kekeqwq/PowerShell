@@ -171,120 +171,93 @@ function Install-WinGetPackage {
 Install-WinGetPackage -Id "marlocarlo.psmux" -CommandCheck "tmux"
 Install-WinGetPackage -Id "JanDeDobbeleer.OhMyPosh" -CommandCheck "oh-my-posh"
 
-# 4. 安装 OpenSSH.Server 功能（兼顾 Windows 正式版与 Insider 预览版系统的容错机制）
+# 4. 安装 OpenSSH.Server 功能（首选使用 Windows 原生 Add-WindowsCapability，全版本通用稳固安装）
 Write-Host "`n[3/7] 配置 OpenSSH Server 服务功能..." -ForegroundColor Yellow
 
-# 检测 Windows 系统版本类型（正式版 vs Insider 预览版）
-$winBuild = [System.Environment]::OSVersion.Version.Build
-$currentVersionKey = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -ErrorAction SilentlyContinue
-$displayVer = if ($currentVersionKey) { $currentVersionKey.DisplayVersion } else { '' }
+$cap = Get-WindowsCapability -Online -Name "OpenSSH.Server~~~~0.0.1.0" -ErrorAction SilentlyContinue
+$isInstalled = ($cap -and $cap.State -eq 'Installed') -or 
+               ((Test-Path "$env:SystemRoot\System32\OpenSSH\sshd.exe") -and (Get-Service sshd -ErrorAction SilentlyContinue))
 
-# 判断是否为 Windows 预览版（Canary / Dev / 高于 26100 的预览 build）
-$isWindowsPreview = ($winBuild -gt 26100) -or 
-                    ($displayVer -in @('Dev', 'Canary')) -or
-                    (Test-Path 'HKLM:\SOFTWARE\Microsoft\WindowsSelfHost\Applicability')
-
-if ($isWindowsPreview) {
-    Write-Host "[*] 检测到 Windows 预览版/Insider 系统 (Build $winBuild, $displayVer)" -ForegroundColor Cyan
-} else {
-    Write-Host "[*] 检测到 Windows 正式版系统 (Build $winBuild, $displayVer)" -ForegroundColor Cyan
-}
-
-$isSshdInstalled = (Test-Path "$env:SystemRoot\System32\OpenSSH\sshd.exe") -or 
-                   (Test-Path "C:\Program Files\OpenSSH\sshd.exe") -or 
-                   (Test-Path "C:\Program Files\OpenSSH-ARM64\sshd.exe") -or 
-                   (Test-Path "C:\Program Files\OpenSSH-Win64\sshd.exe") -or 
-                   (Get-Command sshd.exe -ErrorAction SilentlyContinue) -or 
-                   (Get-Service sshd -ErrorAction SilentlyContinue)
-
-if ($isSshdInstalled) {
+if ($isInstalled) {
     Write-Host "[+] OpenSSH.Server 服务已在系统中安装就绪，跳过重复安装" -ForegroundColor Green
 } else {
-    Write-Host "[*] 系统中尚未检测到 sshd 服务，启动跨 Windows 版本的容错安装..." -ForegroundColor Cyan
+    Write-Host "[*] 正在通过 Add-WindowsCapability 安装原生 OpenSSH.Server..." -ForegroundColor Cyan
+
+    # 临时绕过 WSUS 限制，避免因内网更新服务器缺少 FoD 包导致 0x800F0954 报错或下载挂起
+    $auKey = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU"
+    $origWUServer = $null
+    if (Test-Path $auKey) {
+        $origWUServer = (Get-ItemProperty $auKey -Name UseWUServer -ErrorAction SilentlyContinue).UseWUServer
+        if ($origWUServer -eq 1) {
+            Set-ItemProperty $auKey -Name UseWUServer -Value 0 -Force
+            Restart-Service wuauserv -ErrorAction SilentlyContinue
+        }
+    }
+
     $installed = $false
-
-    # 策略 1（针对 Windows 正式版优先）：正式版拥有官方 FoD 云端支持，使用原生功能安装
-    if (-not $isWindowsPreview) {
-        try {
-            Write-Host "[*] [正式版优先] 正在安装 Windows 原生 OpenSSH.Server 系统功能..." -ForegroundColor Cyan
-            $cap = Add-WindowsCapability -Online -Name 'OpenSSH.Server~~~~0.0.1.0' -ErrorAction Stop
-            if ($cap.State -eq 'Installed' -or (Test-Path "$env:SystemRoot\System32\OpenSSH\sshd.exe")) {
-                $installed = $true
-                Write-Host "[+] Windows 原生 OpenSSH.Server 功能安装成功" -ForegroundColor Green
-            }
-        } catch {
-            Write-Warning "[-] 原生功能在线安装异常 ($_)，正在回退至 WinGet / 独立安装包..."
-        }
-    }
-
-    # 策略 2（预览版首选 / 正式版回退）：通过 WinGet 安装 Microsoft 官方 OpenSSH 包（显示下载安装进度）
-    if (-not $installed) {
-        try {
-            Write-Host "[*] 正在通过 WinGet 安装 Microsoft 官方 OpenSSH（显示实时下载进度）..." -ForegroundColor Cyan
-            & winget install --id Microsoft.OpenSSH.Preview -e --source winget --accept-source-agreements --accept-package-agreements
-            if ($LASTEXITCODE -eq 0 -or (Get-Service sshd -ErrorAction SilentlyContinue) -or (Test-Path "C:\Program Files\OpenSSH\sshd.exe")) {
-                $installed = $true
-                Write-Host "[+] OpenSSH WinGet 安装完成" -ForegroundColor Green
-            }
-        } catch {
-            Write-Warning "[-] WinGet 安装异常: $_"
-        }
-    }
-
-    # 策略 3：若 WinGet 失败，直接从 Microsoft GitHub 发行源下载独立 MSI 安装包（无视 Windows 版本与 Windows Update 限制，100% 独立可靠）
-    if (-not $installed) {
-        try {
-            Write-Host "[*] 正在从 Microsoft GitHub 官方源直接下载独立 OpenSSH MSI 安装包..." -ForegroundColor Cyan
-            $msiArch = if ($isArm64) { "ARM64" } else { "Win64" }
-            $msiUrl = "https://github.com/PowerShell/Win32-OpenSSH/releases/download/10.0.0.0p2-Preview/OpenSSH-$msiArch-v10.0.0.0.msi"
-            $tempMsi = Join-Path $env:TEMP "OpenSSH-$msiArch.msi"
-            Write-Host "[*] 下载地址: $msiUrl" -ForegroundColor Cyan
-            Invoke-WebRequest -Uri $msiUrl -OutFile $tempMsi -UseBasicParsing
-            Write-Host "[*] 正在运行 MSI 安装程序..." -ForegroundColor Cyan
-            $proc = Start-Process -FilePath "msiexec.exe" -ArgumentList @("/i", "`"$tempMsi`"", "/passive", "/norestart") -PassThru -Wait
-            Remove-Item $tempMsi -Force -ErrorAction SilentlyContinue
-            if ($proc.ExitCode -eq 0 -or (Get-Service sshd -ErrorAction SilentlyContinue) -or (Test-Path "C:\Program Files\OpenSSH\sshd.exe")) {
-                $installed = $true
-                Write-Host "[+] OpenSSH MSI 独立安装完成" -ForegroundColor Green
-            }
-        } catch {
-            Write-Warning "[-] 直接下载 MSI 安装包异常: $_"
-        }
-    }
-
-    # 策略 4：若前述方案均未成功，尝试 DISM 命令行安装（最后的兜底）
-    if (-not $installed) {
-        Write-Host "[*] 尝试通过 DISM 在线安装..." -ForegroundColor Cyan
-        & dism.exe /Online /Add-Capability /CapabilityName:OpenSSH.Server~~~~0.0.1.0 /NoRestart
-        if ($LASTEXITCODE -eq 0 -or (Test-Path "$env:SystemRoot\System32\OpenSSH\sshd.exe") -or (Get-Service sshd -ErrorAction SilentlyContinue)) {
+    try {
+        $result = Add-WindowsCapability -Online -Name "OpenSSH.Server~~~~0.0.1.0" -ErrorAction Stop
+        if ($result.State -eq 'Installed' -or (Test-Path "$env:SystemRoot\System32\OpenSSH\sshd.exe")) {
             $installed = $true
-            Write-Host "[+] OpenSSH.Server DISM 安装完成" -ForegroundColor Green
+            Write-Host "[+] Windows 原生 OpenSSH.Server 安装成功" -ForegroundColor Green
+        }
+    } catch {
+        Write-Warning "[-] Add-WindowsCapability 失败: $_，尝试通过 DISM 在线安装..."
+    } finally {
+        if ($origWUServer -eq 1) {
+            Set-ItemProperty $auKey -Name UseWUServer -Value 1 -Force
+            Restart-Service wuauserv -ErrorAction SilentlyContinue
         }
     }
 
-    # 确保 C:\Program Files\OpenSSH 在 PATH 中并注册服务
-    $progOpenSSH = "C:\Program Files\OpenSSH"
-    if (Test-Path $progOpenSSH) {
-        if ($env:PATH -notlike "*$progOpenSSH*") {
-            $env:PATH = "$progOpenSSH;$env:PATH"
+    # 兜底方案 1：DISM 在线安装
+    if (-not $installed) {
+        & dism.exe /Online /Add-Capability /CapabilityName:OpenSSH.Server~~~~0.0.1.0 /NoRestart
+        if ($LASTEXITCODE -eq 0 -or (Test-Path "$env:SystemRoot\System32\OpenSSH\sshd.exe")) {
+            $installed = $true
+            Write-Host "[+] DISM 安装 OpenSSH.Server 成功" -ForegroundColor Green
         }
-        if (-not (Get-Service sshd -ErrorAction SilentlyContinue)) {
+    }
+
+    # 兜底方案 2：若系统组件库严重损坏无法使用 FoD，从官方 GitHub 下载独立发布包解压并运行 install-sshd.ps1
+    if (-not $installed -and -not (Test-Path "$env:SystemRoot\System32\OpenSSH\sshd.exe")) {
+        Write-Warning "[-] 系统 FoD 组件安装受限，正在回退至 Microsoft 官方 Win32-OpenSSH 独立包..."
+        try {
+            $zipArch = if ($isArm64) { "OpenSSH-ARM64.zip" } else { "OpenSSH-Win64.zip" }
+            $zipUrl = "https://github.com/PowerShell/Win32-OpenSSH/releases/download/10.0.0.0p2-Preview/$zipArch"
+            $tempZip = Join-Path $env:TEMP $zipArch
+            Invoke-WebRequest -Uri $zipUrl -OutFile $tempZip -UseBasicParsing
+            $progOpenSSH = "C:\Program Files\OpenSSH"
+            if (-not (Test-Path $progOpenSSH)) { New-Item -Path $progOpenSSH -ItemType Directory -Force | Out-Null }
+            Expand-Archive -Path $tempZip -DestinationPath $env:TEMP -Force
+            $extractedFolder = Join-Path $env:TEMP ($zipArch -replace '\.zip$', '')
+            Copy-Item -Path "$extractedFolder\*" -Destination $progOpenSSH -Recurse -Force
+            Remove-Item $tempZip, $extractedFolder -Recurse -Force -ErrorAction SilentlyContinue
+
             $installScript = Join-Path $progOpenSSH "install-sshd.ps1"
             if (Test-Path $installScript) {
-                & powershell.exe -ExecutionPolicy Bypass -File $installScript | Out-Null
+                & powershell.exe -ExecutionPolicy Bypass -File $installScript
+                $installed = $true
+                Write-Host "[+] 官方独立版 OpenSSH 部署完成" -ForegroundColor Green
             }
+        } catch {
+            Write-Warning "[-] 独立包下载安装失败: $_"
         }
     }
 }
 
-# 确保 sshd 与 ssh-agent 服务设为开机自动启动，并配置服务崩溃自愈策略
+# 启动并配置 sshd 开机自启，同时配置崩溃自愈
 Set-Service sshd -StartupType Automatic -ErrorAction SilentlyContinue
 sc.exe config sshd start= auto | Out-Null
 sc.exe failure sshd reset= 86400 actions= restart/2000/restart/5000/restart/10000 | Out-Null
+Start-Service sshd -ErrorAction SilentlyContinue
+
+# 启动并配置 ssh-agent 开机自启
 Set-Service ssh-agent -StartupType Automatic -ErrorAction SilentlyContinue
 sc.exe config ssh-agent start= auto | Out-Null
-Restart-Service sshd -ErrorAction SilentlyContinue
-Write-Host "[+] sshd 服务已设置为开机自动启动（已启用崩溃自愈策略）" -ForegroundColor Green
+Start-Service ssh-agent -ErrorAction SilentlyContinue
+
+Write-Host "[+] sshd 与 ssh-agent 服务已设为开机自动启动并已启动（已配置崩溃自愈）" -ForegroundColor Green
 
 # 5. 配置防火墙入站规则（确保放行所有网络类型：Domain, Private, Public）
 Write-Host "`n[4/7] 配置防火墙 22 端口 (放行所有网络类型: 局域网/公用网络)..." -ForegroundColor Yellow
