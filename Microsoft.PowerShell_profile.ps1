@@ -1,6 +1,8 @@
 # scp / sftp / ssh host <command>：整文件退出，禁止任何输出
 if ($env:SSH_ORIGINAL_COMMAND) { return }
 
+$env:TERM = 'xterm-256color'
+
 $argv = [Environment]::GetCommandLineArgs()
 if ($argv | Where-Object { $_ -in '-Command', '-c', '-File' }) { return }
 
@@ -71,7 +73,7 @@ Set-All-Alias
 $oldPath = [Environment]::GetEnvironmentVariable("Path", "User")
 
 # 2. Append the new folder
-$newPath = $oldPath + ";C:\Users\keke\Downloads\emacs\bin"
+$newPath = $oldPath + ";C:\Users\keke\Downloads\emacs\bin;C:\msys64\clangarm64\bin"
 
 # 3. Save it back to the environment
 [Environment]::SetEnvironmentVariable("Path", $newPath, "User")
