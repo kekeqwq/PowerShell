@@ -113,7 +113,7 @@ if ($ResolvedKeyPath -and (Test-Path $ResolvedKeyPath)) {
 }
 
 # 2. 下载并部署最新 Preview 版 PowerShell 到 ~/Downloads/pwsh（写死 Preview 绿色版）
-Write-Host "`n[1/7] 检查并部署 Preview 版 PowerShell (写死 ~/Downloads/pwsh)..." -ForegroundColor Yellow
+Write-Host "`n[1/6] 检查并部署 Preview 版 PowerShell (写死 ~/Downloads/pwsh)..." -ForegroundColor Yellow
 $isArm64 = ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') -or
            ([System.Environment]::GetEnvironmentVariable('PROCESSOR_ARCHITEW6432') -eq 'ARM64')
 $arch = if ($isArm64) { 'arm64' } else { 'x64' }
@@ -161,7 +161,7 @@ try {
 }
 
 # 3. 安装其余依赖 (psmux, oh-my-posh)
-Write-Host "`n[2/7] 检查并安装 WinGet 依赖组件..." -ForegroundColor Yellow
+Write-Host "`n[2/6] 检查并安装 WinGet 依赖组件..." -ForegroundColor Yellow
 
 function Install-WinGetPackage {
     param([string]$Id, [string]$CommandCheck)
@@ -185,7 +185,7 @@ Install-WinGetPackage -Id "marlocarlo.psmux" -CommandCheck "tmux"
 Install-WinGetPackage -Id "JanDeDobbeleer.OhMyPosh" -CommandCheck "oh-my-posh"
 
 # 4. 检查、安装并修复 OpenSSH.Server 服务功能
-Write-Host "`n[3/7] 配置 OpenSSH Server 服务功能与持久化自启..." -ForegroundColor Yellow
+Write-Host "`n[3/6] 配置 OpenSSH Server 服务功能与持久化自启..." -ForegroundColor Yellow
 
 $sysSshdExe = "$env:SystemRoot\System32\OpenSSH\sshd.exe"
 $progSshdExe = "C:\Program Files\OpenSSH\sshd.exe"
@@ -367,7 +367,7 @@ if ($currentSshd -and $currentSshd.Status -eq 'Running') {
 }
 
 # 5. 配置防火墙入站规则（确保放行所有网络类型：Domain, Private, Public）
-Write-Host "`n[4/7] 配置防火墙 22 端口 (放行所有网络类型: 局域网/公用网络)..." -ForegroundColor Yellow
+Write-Host "`n[4/6] 配置防火墙 22 端口 (放行所有网络类型: 局域网/公用网络)..." -ForegroundColor Yellow
 $fwRule = Get-NetFirewallRule -Name "OpenSSH-Server-In-TCP" -ErrorAction SilentlyContinue
 if (-not $fwRule) {
     New-NetFirewallRule -Name "OpenSSH-Server-In-TCP" `
@@ -392,7 +392,7 @@ try {
 } catch {}
 
 # 6. 配置 sshd 默认 Shell 与公钥认证
-Write-Host "`n[5/7] 配置 sshd 默认 Shell 及公钥认证..." -ForegroundColor Yellow
+Write-Host "`n[5/6] 配置 sshd 默认 Shell 及公钥认证..." -ForegroundColor Yellow
 if (Test-Path $targetPwshExe) {
     if (-not (Test-Path "HKLM:\SOFTWARE\OpenSSH")) {
         New-Item -Path "HKLM:\SOFTWARE\OpenSSH" -Force | Out-Null
@@ -452,17 +452,8 @@ Set-Service sshd -StartupType Automatic -ErrorAction SilentlyContinue
 Restart-Service sshd -ErrorAction SilentlyContinue
 Write-Host "[+] sshd 服务已重启并确认开机自启生效" -ForegroundColor Green
 
-# 7. 注册 TmuxRelay 桌面交互计划任务
-Write-Host "`n[6/7] 注册 TmuxRelay 桌面交互计划任务..." -ForegroundColor Yellow
-$modulePath = Join-Path $PSScriptRoot "Modules\TmuxRelay\TmuxRelay.psd1"
-if (Test-Path $modulePath) {
-    Import-Module $modulePath -Force
-    Install-TmuxRelayTask -Session 'main'
-    Write-Host "[+] TmuxRelay-main 计划任务已就绪" -ForegroundColor Green
-}
-
-# 8. 开启脚本执行策略
-Write-Host "`n[7/7] 开启当前用户脚本执行权限 (RemoteSigned)..." -ForegroundColor Yellow
+# 7. 开启脚本执行策略
+Write-Host "`n[6/6] 开启当前用户脚本执行权限 (RemoteSigned)..." -ForegroundColor Yellow
 Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned -Force
 Write-Host "[+] ExecutionPolicy RemoteSigned 已生效" -ForegroundColor Green
 
@@ -524,7 +515,7 @@ foreach ($ip in $ips) {
     Write-Host "  ssh $env:USERNAME@$ip" -ForegroundColor Yellow
 }
 Write-Host "-----------------------------------------" -ForegroundColor Gray
-Write-Host "提示：若机器刚重启尚未登录物理桌面，连入将自动安全启动独立 Tmux 会话，绝不中断。" -ForegroundColor Gray
+Write-Host "提示：首次连接前请确认本机已登录物理桌面（console Active）。" -ForegroundColor Gray
 
 Write-Host "`n=========================================" -ForegroundColor Cyan
 Write-Host "  配置已全部就绪，请按任意键退出窗口..." -ForegroundColor Yellow
