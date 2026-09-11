@@ -188,11 +188,13 @@ if ($isSshdInstalled) {
             }
         }
 
-        Write-Host "[*] 正在通过 DISM 静默安装 OpenSSH.Server 功能..." -ForegroundColor Cyan
-        & dism.exe /Online /Add-Capability /CapabilityName:OpenSSH.Server~~~~0.0.1.0 /Quiet /NoRestart 2>&1 | Out-Null
+        Write-Host "[*] 正在通过 DISM 在线安装 OpenSSH.Server（实时显示百分比进度）..." -ForegroundColor Cyan
+        & dism.exe /Online /Add-Capability /CapabilityName:OpenSSH.Server~~~~0.0.1.0 /NoRestart
         if ($LASTEXITCODE -eq 0 -or (Test-Path "$env:SystemRoot\System32\OpenSSH\sshd.exe") -or (Get-Service sshd -ErrorAction SilentlyContinue)) {
             $installed = $true
             Write-Host "[+] OpenSSH.Server 安装完成" -ForegroundColor Green
+        } else {
+            Write-Warning "[-] DISM 安装退出代码: $LASTEXITCODE，准备切换至 WinGet 官方安装源..."
         }
 
         if ($origWUServer -eq 1) {
@@ -204,8 +206,8 @@ if ($isSshdInstalled) {
 
     # 2. 若 Windows Update 下载受阻，自动回退到 WinGet 官方 MSI 安装
     if (-not $installed -and -not (Test-Path "$env:SystemRoot\System32\OpenSSH\sshd.exe") -and -not (Get-Service sshd -ErrorAction SilentlyContinue)) {
-        Write-Host "[*] Windows Update 速度较慢，正在回退通过 WinGet 安装 Microsoft OpenSSH..." -ForegroundColor Cyan
-        & winget install --id Microsoft.OpenSSH.Preview -e --source winget --accept-source-agreements --accept-package-agreements --silent 2>&1 | Out-Null
+        Write-Host "[*] 正在回退通过 WinGet 安装 Microsoft OpenSSH 官方包（显示下载进度）..." -ForegroundColor Cyan
+        & winget install --id Microsoft.OpenSSH.Preview -e --source winget --accept-source-agreements --accept-package-agreements
         if ($LASTEXITCODE -eq 0 -or (Get-Service sshd -ErrorAction SilentlyContinue)) {
             $installed = $true
             Write-Host "[+] OpenSSH 安装完成" -ForegroundColor Green
