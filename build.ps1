@@ -164,13 +164,53 @@ Install-WinGetPackage -Id "JanDeDobbeleer.OhMyPosh" -CommandCheck "oh-my-posh"
 
 # 4. 安装 OpenSSH.Server 功能
 Write-Host "`n[3/7] 配置 OpenSSH Server 服务功能..." -ForegroundColor Yellow
-$sshCap = Get-WindowsCapability -Online -Name "OpenSSH.Server~~~~0.0.1.0"
-if ($sshCap.State -ne 'Installed') {
-    Write-Host "[*] 正在安装 OpenSSH.Server 功能..." -ForegroundColor Cyan
-    Add-WindowsCapability -Online -Name "OpenSSH.Server~~~~0.0.1.0" | Out-Null
-    Write-Host "[+] OpenSSH.Server 安装完成" -ForegroundColor Green
+
+$isSshdInstalled = (Test-Path "$env:SystemRoot\System32\OpenSSH\sshd.exe") -or 
+                   (Get-Command sshd.exe -ErrorAction SilentlyContinue) -or 
+                   (Get-Service sshd -ErrorAction SilentlyContinue)
+
+if ($isSshdInstalled) {
+    Write-Host "[+] OpenSSH.Server 服务已在系统中安装就绪，跳过重复安装" -ForegroundColor Green
 } else {
-    Write-Host "[+] OpenSSH.Server 功能已安装" -ForegroundColor Green
+    Write-Host "[*] 检测到系统中尚未安装 OpenSSH.Server，开始安装..." -ForegroundColor Cyan
+    $installed = $false
+
+    # 1. 尝试通过 DISM / Windows 功能安装
+    try {
+        # 若系统配置了 WSUS，可能会拦截 FoD 下载并导致卡在 30%，临时绕过
+        $auKey = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU"
+        $origWUServer = $null
+        if (Test-Path $auKey) {
+            $origWUServer = (Get-ItemProperty $auKey -Name UseWUServer -ErrorAction SilentlyContinue).UseWUServer
+            if ($origWUServer -eq 1) {
+                Set-ItemProperty $auKey -Name UseWUServer -Value 0 -Force
+                Restart-Service wuauserv -ErrorAction SilentlyContinue
+            }
+        }
+
+        Write-Host "[*] 正在通过 DISM 静默安装 OpenSSH.Server 功能..." -ForegroundColor Cyan
+        & dism.exe /Online /Add-Capability /CapabilityName:OpenSSH.Server~~~~0.0.1.0 /Quiet /NoRestart 2>&1 | Out-Null
+        if ($LASTEXITCODE -eq 0 -or (Test-Path "$env:SystemRoot\System32\OpenSSH\sshd.exe") -or (Get-Service sshd -ErrorAction SilentlyContinue)) {
+            $installed = $true
+            Write-Host "[+] OpenSSH.Server 安装完成" -ForegroundColor Green
+        }
+
+        if ($origWUServer -eq 1) {
+            Set-ItemProperty $auKey -Name UseWUServer -Value 1 -Force
+        }
+    } catch {
+        Write-Warning "[-] DISM 功能安装出现异常: $_"
+    }
+
+    # 2. 若 Windows Update 下载受阻，自动回退到 WinGet 官方 MSI 安装
+    if (-not $installed -and -not (Test-Path "$env:SystemRoot\System32\OpenSSH\sshd.exe") -and -not (Get-Service sshd -ErrorAction SilentlyContinue)) {
+        Write-Host "[*] Windows Update 速度较慢，正在回退通过 WinGet 安装 Microsoft OpenSSH..." -ForegroundColor Cyan
+        & winget install --id Microsoft.OpenSSH.Preview -e --source winget --accept-source-agreements --accept-package-agreements --silent 2>&1 | Out-Null
+        if ($LASTEXITCODE -eq 0 -or (Get-Service sshd -ErrorAction SilentlyContinue)) {
+            $installed = $true
+            Write-Host "[+] OpenSSH 安装完成" -ForegroundColor Green
+        }
+    }
 }
 
 # 5. 配置防火墙入站规则
