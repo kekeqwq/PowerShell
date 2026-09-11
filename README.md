@@ -1,240 +1,95 @@
-# Windows SSH + Tmux (psmux) 远程环境
+﻿# Windows SSH + Tmux (psmux) 远程环境一键配置
 
-在全新 Windows 上恢复「从 Linux / macOS SSH 进来，和本机打开终端同一套会话」的环境，替代并优于原 Zellij 方案。
-
-个人配置（PowerShell profile、TmuxRelay 模块、`~/.tmux.conf`）放在本仓库对应路径，本文包含完整的环境安装顺序、系统服务配置、核心原理与排障验收。
-
-```text
-Linux / macOS
-      |
-      | SSH
-      v
-Windows OpenSSH (sshd)
-      |
-      | profile → Enter-TmuxRelay
-      v
-计划任务 TmuxRelay-main
-      |
-      | 在 console 桌面会话里 new-session -d
-      v
-Tmux session `main`
-      |
-      | SSH 只 attach-session
-      v
-远端终端 (完整桌面交互环境)
-```
+在全新 Windows 电脑上快速恢复「从 Linux / macOS SSH 进来，与本机桌面共享同一套会话」的环境，使用原生 `psmux` (Tmux) 方案。
 
 ---
 
-## 最终效果
+## 快速开始（新电脑部署）
 
-- Linux / macOS 用密钥 SSH 登录 Windows，免密码
-- `sshd` 开机自启，防火墙放行 22 端口
-- 交互登录自动进入 Tmux `main` 会话
-- **创建会话发生在本机已登录的桌面会话**，而非 sshd 的 elevated / 无桌面会话
-- SSH 断开只 detach，再连回去还是同一个 `main`
-- 在最后一个窗口/分屏退出后会话自动销毁，下次 SSH 再走计划任务新建
-- 类似 Fish 的历史命令浅色预测提示与补全（`InlineView` + 右箭头 / `Ctrl+f` 采纳）
-- 计划任务只有一条 `TmuxRelay-main`，无触发器，平时不跑、不占资源
+在一台全新的 Windows 电脑上，只需执行以下步骤：
 
----
-
-## 限制（先看）
-
-桌面会话创建依赖本机 **已经有人登录在 console**，且不是 `Disc`：
+### 1. 克隆本仓库
+打开系统自带的 PowerShell（推荐右键选择 **以管理员身份运行**）：
 
 ```powershell
-query session
-```
+# 1. 安装 Git（若未安装）
+winget install --id Git.Git -e --source winget
 
-需要输出类似：
-
-```text
-console    keke    1    Active
-```
-
-锁屏可以，只要用户桌面会话还在。  
-刚重启停在登录界面、console 不存在时，无法「模拟本地创建」，这是 Windows 会话隔离机制，非脚本错误。
-
-**不要做**：
-- 开机自动启动 Tmux
-- 在 SSH 进程里直接 `tmux new -s main`（会得到 Administrator 标题、桌面命令与部分环境变量不可用的受限会话）
-
----
-
-## 1. 安装 OpenSSH Server
-
-管理员权限打开 PowerShell：
-
-```powershell
-Get-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
-```
-
-若 `State : NotPresent`，执行安装：
-
-```powershell
-Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0
-```
-
-确认 `State : Installed`。
-
----
-
-## 2. 启动 sshd 并设为开机自启
-
-```powershell
-Start-Service sshd
-Set-Service sshd -StartupType Automatic
-Get-Service sshd | Select-Object Name, StartType, Status
-```
-
-应输出 `Automatic` + `Running`。
-
----
-
-## 3. 配置防火墙放行 22 端口
-
-```powershell
-Get-NetFirewallRule -Name OpenSSH-Server-In-TCP -ErrorAction SilentlyContinue
-```
-
-若不存在则创建规则：
-
-```powershell
-New-NetFirewallRule `
-    -Name OpenSSH-Server-In-TCP `
-    -DisplayName "OpenSSH Server (sshd)" `
-    -Enabled True `
-    -Direction Inbound `
-    -Protocol TCP `
-    -LocalPort 22 `
-    -Action Allow
-```
-
----
-
-## 4. 将 sshd 默认壳改为 pwsh
-
-Win32-OpenSSH 默认登录 Shell 是 `cmd.exe`。管理员执行：
-
-```powershell
-New-ItemProperty -Path HKLM:\SOFTWARE\OpenSSH -Name DefaultShell `
-    -Value (Get-Command pwsh).Source -PropertyType String -Force
-Restart-Service sshd
-```
-
-注：若 `pwsh` 不在系统默认路径，可指定实际绝对路径（如 `C:\Users\<user>\Downloads\pwsh\pwsh.exe`）。
-
----
-
-## 5. 公钥免密登录与权限
-
-客户端生成密钥（若已有可跳过）：
-
-```bash
-ssh-keygen -t ed25519
-```
-
-将客户端公钥 `id_ed25519.pub` 内容追加写入 Windows 目标用户：
-
-```text
-C:\Users\<username>\.ssh\authorized_keys
-```
-
-**管理员组用户注意**：Windows 默认 `sshd_config` 会对 Administrators 组改读：
-
-```text
-C:\ProgramData\ssh\administrators_authorized_keys
-```
-
-推荐直接编辑 `C:\ProgramData\ssh\sshd_config`，注释掉末尾这两行：
-
-```text
-# Match Group administrators
-#     AuthorizedKeysFile __PROGRAMDATA__/ssh/administrators_authorized_keys
-```
-
-然后重启服务：`Restart-Service sshd`。
-
-收紧 ACL 权限：
-
-```powershell
-icacls "$HOME\.ssh" /inheritance:r /grant "$($env:USERNAME):(OI)(CI)F" "SYSTEM:(OI)(CI)F"
-icacls "$HOME\.ssh\authorized_keys" /inheritance:r /grant "$($env:USERNAME):F" "SYSTEM:F"
-```
-
-客户端测试免密登录：
-
-```bash
-ssh username@windows-host
-```
-
-应免密直接进入 pwsh。
-
----
-
-## 6. 安装必备依赖项
-
-在 Windows 本机安装以下依赖：
-
-1. **PowerShell 7 (pwsh)**：
-   ```powershell
-   winget install --id Microsoft.PowerShell --source winget
-   ```
-2. **psmux (原生 Windows Tmux 实现)**：
-   ```powershell
-   winget install --id marlocarlo.psmux --source winget
-   ```
-3. **oh-my-posh (提示符主题渲染)**：
-   ```powershell
-   winget install --id JanDeDobbeleer.OhMyPosh --source winget
-   ```
-
----
-
-## 7. 恢复本仓库用户环境
-
-克隆本仓库到用户的 `Documents` 目录：
-
-```powershell
-cd C:\Users\$env:USERNAME\Documents
+# 2. 克隆本仓库到用户 Documents 目录
+cd ~/Documents
 git clone https://github.com/kekeqwq/PowerShell.git PowerShell
+cd ~/Documents/PowerShell
 ```
 
-对应组件：
+### 2. 准备公钥
+将客户端公钥保存至例如 `~/Downloads/authorized_keys`（或 `id_ed25519.pub`）。
 
-| 路径 | 作用 |
-| --- | --- |
-| `Microsoft.PowerShell_profile.ps1` | 交互 Profile，加载 TmuxRelay、配置预测补全与快捷键 |
-| `Modules/TmuxRelay/` | 跨桌面会话创建与挂载 Tmux 会话核心模块 |
-| `~/.tmux.conf` / `~/.psmux.conf` | Windows Tmux 主配置，包含 Prefix、Catppuccin 主题与快捷键 |
+### 3. 运行一键构建脚本
 
-### 关键配置说明：
-1. **预测补全**：在 `~/.tmux.conf` 顶部必须包含 `set -g allow-predictions on`，防止 `psmux` 自动重置 PSReadLine 的预测配置。
-2. **鼠标报告规避**：Windows ConPTY 在通过 SSH 传输鼠标输入时可能丢失转义前缀，导致鼠标移动时在命令行残留 `35;xx;xxM` 等字符。因此在 Windows 端配置 `set -g mouse off`，并在 profile 中强制 `$env:PSMUX_FORCE_MOUSE = '0'`。
+> **注意（关于脚本执行策略）**：  
+> Windows 默认禁止运行 `.ps1` 脚本（`Restricted` 策略）。本仓库提供了两种执行方式：
+
+#### 方式 A（推荐，CMD 包装器自动绕过策略）：
+```powershell
+./build.cmd ~/Downloads/authorized_keys
+```
+
+#### 方式 B（原生 PowerShell 脚本）：
+如直接运行 `./build.ps1`，需先开启当前用户脚本执行权限：
+```powershell
+# 开启脚本执行开关（仅需运行一次）
+Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned -Force
+
+# 运行构建脚本
+./build.ps1 ~/Downloads/authorized_keys
+```
+
+脚本若未在管理员权限下运行，会自动弹出 UAC 提权窗口；若在无图形环境下请直接以管理员身份打开终端运行。
 
 ---
 
-## 8. 新电脑恢复操作清单
+## 脚本自动完成的操作
 
-```text
-1. 管理员运行 PowerShell，安装 OpenSSH.Server 功能
-2. 启动 sshd，并将 StartupType 设为 Automatic
-3. 防火墙放行 TCP 22 端口
-4. 修改注册表 HKLM:\SOFTWARE\OpenSSH DefaultShell 为 pwsh.exe
-5. 导入 authorized_keys，修正 sshd_config 中管理员组公钥文件规则
-6. 客户端验证免密 SSH 登录成功
-7. winget 安装 pwsh、psmux、oh-my-posh
-8. 克隆本仓库至 ~/Documents/PowerShell
-9. 部署 ~/.tmux.conf（或创建软链接）
-10. 本机先登录桌面（确认 query session 显示 console Active）
-11. 远端 SSH 连接，自动进入 Tmux main 会话
-12. 在 Tmux 中退出后再次 SSH，验证能否重新在桌面会话中拉起新会话
-```
+运行脚本后，将全自动完成以下所有配置：
+
+1. **PowerShell Preview 下载部署**：
+   - 自动识别系统架构（ARM64 / x64）；
+   - 从微软官方发布源直接获取最新 Preview 版本（无需鉴权，不触发 GitHub API 速率限制）；
+   - 下载 ZIP 绿色包并解压部署到 `~/Downloads/pwsh`。
+2. **依赖组件静默安装**：
+   - 通过 WinGet 自动安装 `marlocarlo.psmux` (Windows 原生 Tmux)；
+   - 通过 WinGet 自动安装 `JanDeDobbeleer.OhMyPosh` 提示符工具。
+3. **OpenSSH Server 服务配置**：
+   - 安装 `OpenSSH.Server` 系统功能并设为开机自启；
+   - 防火墙放行 TCP 22 端口入站连接；
+   - 修改注册表 `HKLM:\SOFTWARE\OpenSSH` 的 `DefaultShell`，指定为 `~/Downloads/pwsh/pwsh.exe`；
+   - 优化 `sshd_config`（解除管理员组公钥重定向限制，支持全局读取 `~/.ssh/authorized_keys`）；
+   - 导入公钥并设置规范的 Windows ACL 权限。
+4. **Tmux / psmux 配置文件部署**：
+   - 将移植自 Omarchy 的 Catppuccin 主题部署至 `~/.tmux.conf`、`~/.psmux.conf`；
+   - 配置 `set -g allow-predictions on`（启用类似 fish 的浅色历史预测与右箭头补全）；
+   - 配置 `set -g mouse off`（避免 Windows ConPTY 在 SSH 模式下产生 `35;xx;xxM` 鼠标转义字符泄漏）。
+5. **桌面挂载计划任务就绪**：
+   - 导入 `TmuxRelay` 模块并预注册 `TmuxRelay-main` 交互式桌面计划任务；
+   - 确保从远端 SSH 连入时直接穿透进本地桌面的 Session，具备完整的图形桌面令牌、GPU 加速与交互权限。
 
 ---
 
-## 9. 日常维护与命令
+## 远端连接与验证
+
+构建完成后，控制台将输出本机的局域网 IP 地址。在 macOS / Linux 端直接连接：
+
+```bash
+ssh <username>@<windows-ip>
+```
+
+- **免密接入**：直接进入 Tmux `main` 会话。
+- **共享环境**：与 Windows 物理屏幕打开的终端完全同源。
+- **持久运行**：断开 SSH 会话不中断后台进程，再次连入自动 Attach。
+
+---
+
+## 常见维护命令
 
 ```powershell
 # 查看所有 tmux 会话
@@ -243,28 +98,9 @@ tmux list-sessions
 # 手动连接到 main 会话
 tmux attach-session -t main
 
-# 查看中转计划任务
-Get-ScheduledTask -TaskName TmuxRelay-main
-schtasks /query /tn TmuxRelay-main /fo LIST /v
-
-# 强制清理会话服务（遇到僵死时）
+# 强制重置 tmux 服务（会话异常时）
 tmux kill-server
 
-# 强制重建计划任务
-Unregister-ScheduledTask -TaskName TmuxRelay-main -Confirm:$false
+# 查看中转计划任务状态
+Get-ScheduledTask -TaskName TmuxRelay-main
 ```
-
----
-
-## 10. 排障速查表
-
-| 现象 | 原因 | 处理 |
-| --- | --- | --- |
-| 标题显示 `Administrator: ...pwsh.exe`，桌面命令失败 | 在 SSH 会话中直接新建了会话 | 不要直接执行 `tmux new`，退出后通过 `Enter-TmuxRelay` 经计划任务创建 |
-| 报 `failed to create desktop tmux session` | console 不在，或任务没跑起来 | 检查 `query session`，确认计划任务设置允许电池运行 |
-| 终端偶尔自动输入 `35;xx;xxM` 字符 | ConPTY 在 SSH 下漏掉鼠标 SGR 转义头 | 确保 `.tmux.conf` 中 `set -g mouse off` 且 profile 包含鼠标模式重置 |
-| 缺少类似 Fish 的浅色命令预测补全 | psmux 默认关闭了预测选项 | 确保 `.tmux.conf` 顶部有 `set -g allow-predictions on` |
-| 弹出粉框窗口或红字 Exception | 计划任务加载了 profile 导致嵌套 | 计划任务参数必须包含 `-NoProfile -WindowStyle Hidden` |
-| 提示符路径在 `C:\Windows\System32` | 任务默认工作目录不正确 | 检查任务 Action 的 WorkingDirectory 是否为 `$HOME` |
-| 任务状态为 `267011` / 任务不运行 | 笔记本/Surface 处于电池供电状态 | 在任务 Settings 中开启 `AllowStartIfOnBatteries` |
-| `No mapping between account names and security IDs` | UserId 写成了 `WORKGROUP\user` | 使用 `$env:COMPUTERNAME\$env:USERNAME` 形式 |

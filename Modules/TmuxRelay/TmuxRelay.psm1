@@ -43,6 +43,8 @@ function Get-TmuxPath {
 }
 
 function Get-PwshPath {
+    $downloadPwsh = Join-Path $HOME 'Downloads\pwsh\pwsh.exe'
+    if (Test-Path $downloadPwsh) { return $downloadPwsh }
     $cmd = Get-Command pwsh -ErrorAction SilentlyContinue
     if ($cmd) { return $cmd.Source }
     throw 'pwsh.exe not found'
