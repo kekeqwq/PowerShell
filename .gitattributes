@@ -1,0 +1,2 @@
+*.ps1 text working-tree-encoding=UTF-8
+*.cmd text eol=crlf

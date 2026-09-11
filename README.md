@@ -1,4 +1,4 @@
-﻿# Windows SSH + Tmux (psmux) 远程环境一键配置
+# Windows SSH + Tmux (psmux) 远程环境一键配置
 
 在全新 Windows 电脑上快速恢复「从 Linux / macOS SSH 进来，与本机桌面共享同一套会话」的环境，使用原生 `psmux` (Tmux) 方案。
 
@@ -21,8 +21,8 @@ git clone https://github.com/kekeqwq/PowerShell.git PowerShell
 cd ~/Documents/PowerShell
 ```
 
-### 2. 准备公钥
-将客户端公钥保存至例如 `~/Downloads/authorized_keys`（或 `id_ed25519.pub`）。
+### 2. 准备连入公钥
+将准备连入此机器的客户端公钥（例如 `id_ed25519.pub` 或 `authorized_keys`）放置在任意路径（如 `~/Downloads/id_ed25519.pub`）。
 
 ### 3. 运行一键构建脚本
 
@@ -31,7 +31,7 @@ cd ~/Documents/PowerShell
 
 #### 方式 A（推荐，CMD 包装器自动绕过策略）：
 ```powershell
-./build.cmd ~/Downloads/authorized_keys
+./build.cmd ~/Downloads/id_ed25519.pub
 ```
 
 #### 方式 B（原生 PowerShell 脚本）：
@@ -41,10 +41,13 @@ cd ~/Documents/PowerShell
 Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned -Force
 
 # 运行构建脚本
-./build.ps1 ~/Downloads/authorized_keys
+./build.ps1 ~/Downloads/id_ed25519.pub
 ```
 
-脚本若未在管理员权限下运行，会自动弹出 UAC 提权窗口；若在无图形环境下请直接以管理员身份打开终端运行。
+> **说明**：
+> - 传入参数支持公钥文件（如 `id_ed25519.pub`）或多密钥的 `authorized_keys` 文件，支持直接路径、相对路径或 `~` 简写；
+> - 若不带参数执行，脚本会自动搜索 `~/Downloads` 和 `~/.ssh` 目录下的 `id_ed25519.pub` / `authorized_keys`；
+> - 脚本若未在管理员终端下执行，会自动请求 UAC 提权。若在无图形环境下请以管理员身份打开终端后执行。
 
 ---
 

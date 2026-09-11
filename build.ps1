@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [Parameter(Position = 0)]
     [string]$AuthorizedKeysPath,
@@ -7,27 +7,60 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Net.Http -ErrorAction SilentlyContinue
 
-# 展开并解析公钥文件路径（避免 UAC 提权切换目录导致相对路径失效）
-if ($AuthorizedKeysPath) {
-    if ($AuthorizedKeysPath.StartsWith("~")) {
-        $AuthorizedKeysPath = Join-Path $HOME $AuthorizedKeysPath.Substring(1).TrimStart('\', '/')
-    } elseif (-not [System.IO.Path]::IsPathRooted($AuthorizedKeysPath)) {
-        $AuthorizedKeysPath = [System.IO.Path]::GetFullPath((Join-Path (Get-Location) $AuthorizedKeysPath))
+# 智能解析公钥文件路径（支持直接路径、~、相对路径，以及自动定位常见文件名）
+function Resolve-KeyPath {
+    param([string]$Path)
+    if ($Path) {
+        # 1. 展开 ~
+        if ($Path.StartsWith("~")) {
+            $Path = Join-Path $HOME $Path.Substring(1).TrimStart('\', '/')
+        }
+
+        # 2. 直接检查完整路径
+        if (Test-Path $Path) {
+            return [System.IO.Path]::GetFullPath($Path)
+        }
+
+        # 3. 检查相对于当前工作目录的路径
+        $cwdPath = Join-Path (Get-Location) $Path
+        if (Test-Path $cwdPath) {
+            return [System.IO.Path]::GetFullPath($cwdPath)
+        }
+
+        # 4. 容错处理：用户在 Documents\PowerShell 输入 ..\.ssh\... 时自动匹配用户目录
+        $fileName = [System.IO.Path]::GetFileName($Path)
+        $candidates = @(
+            (Join-Path $HOME ".ssh\$fileName"),
+            (Join-Path $HOME "Downloads\$fileName"),
+            (Join-Path $HOME $Path.TrimStart('\', '/', '.'))
+        )
+        foreach ($c in $candidates) {
+            if (Test-Path $c) {
+                return [System.IO.Path]::GetFullPath($c)
+            }
+        }
     }
-} else {
+
+    # 5. 未显式传入参数时，自动扫描默认路径下的公钥文件
     $defaultKeys = @(
         (Join-Path $HOME "Downloads\authorized_keys"),
         (Join-Path $HOME "Downloads\id_ed25519.pub"),
-        (Join-Path $HOME "Downloads\id_rsa.pub")
+        (Join-Path $HOME "Downloads\id_rsa.pub"),
+        (Join-Path $HOME ".ssh\id_ed25519.pub"),
+        (Join-Path $HOME ".ssh\id_rsa.pub")
     )
     foreach ($k in $defaultKeys) {
         if (Test-Path $k) {
-            $AuthorizedKeysPath = $k
-            break
+            return [System.IO.Path]::GetFullPath($k)
         }
     }
+
+    return $null
 }
+
+$ResolvedKeyPath = Resolve-KeyPath -Path $AuthorizedKeysPath
 
 # 1. 确保以管理员权限运行
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -39,15 +72,15 @@ if (-not $isAdmin -and -not $SkipAdminCheck) {
     $callerExe = (Get-Process -Id $PID).Path
     $escapedScript = "`"$PSCommandPath`""
     $argList = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $escapedScript)
-    if ($AuthorizedKeysPath) {
-        $argList += "`"$AuthorizedKeysPath`""
+    if ($ResolvedKeyPath) {
+        $argList += "`"$ResolvedKeyPath`""
     }
     try {
         $p = Start-Process -FilePath $callerExe -ArgumentList $argList -Verb RunAs -PassThru -Wait
         exit $p.ExitCode
     } catch {
-        Write-Warning "[-] 无法自动拉起管理员权限窗口（可能在无图形界面的远程/后台终端中运行）。"
-        Write-Warning "[-] 请右键以管理员身份运行终端后重新执行脚本。"
+        Write-Warning "[-] 无法自动拉起管理员提权窗口（可能在无图形界面的远程/后台终端中运行）。"
+        Write-Warning "[-] 请右键选择『以管理员身份运行』PowerShell 终端后重新执行脚本。"
         exit 1
     }
 }
@@ -56,10 +89,10 @@ Write-Host "=========================================" -ForegroundColor Cyan
 Write-Host "  Windows SSH + Tmux 环境一键部署脚本" -ForegroundColor Cyan
 Write-Host "=========================================" -ForegroundColor Cyan
 
-if ($AuthorizedKeysPath -and (Test-Path $AuthorizedKeysPath)) {
-    Write-Host "[+] 使用公钥文件: $AuthorizedKeysPath" -ForegroundColor Green
+if ($ResolvedKeyPath -and (Test-Path $ResolvedKeyPath)) {
+    Write-Host "[+] 识别到免密登录公钥: $ResolvedKeyPath" -ForegroundColor Green
 } else {
-    Write-Warning "[-] 未指定或未找到公钥文件，稍后需手动配置 ~/.ssh/authorized_keys"
+    Write-Warning "[-] 未找到公钥文件，稍后需手动配置 ~/.ssh/authorized_keys"
 }
 
 # 2. 下载/更新最新的 Preview 版 PowerShell 到 ~/Downloads/pwsh
@@ -102,7 +135,7 @@ try {
         Write-Host "[+] PowerShell Preview 安装完成" -ForegroundColor Green
     }
 } catch {
-    Write-Warning "[-] 自动下载最新 Preview 版失败: $_。将使用现有 PowerShell"
+    Write-Warning "[-] 自动下载最新 Preview 版失败: $_。将使用系统现有 PowerShell"
 }
 
 # 3. 安装其余依赖 (psmux, oh-my-posh)
@@ -183,13 +216,13 @@ if (Test-Path $sshdConfig) {
 }
 
 # 导入公钥
-if ($AuthorizedKeysPath -and (Test-Path $AuthorizedKeysPath)) {
+if ($ResolvedKeyPath -and (Test-Path $ResolvedKeyPath)) {
     $sshDir = Join-Path $HOME ".ssh"
     if (-not (Test-Path $sshDir)) {
         New-Item -Path $sshDir -ItemType Directory -Force | Out-Null
     }
     $authKeysFile = Join-Path $sshDir "authorized_keys"
-    $newKeys = Get-Content -Path $AuthorizedKeysPath | Where-Object { $_ -and $_.Trim() }
+    $newKeys = Get-Content -Path $ResolvedKeyPath | Where-Object { $_ -and $_.Trim() -and ($_ -match '^(ssh-|ecdsa-|sk-)') }
 
     $existingKeys = @()
     if (Test-Path $authKeysFile) {
