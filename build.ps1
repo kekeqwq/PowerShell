@@ -10,6 +10,19 @@ param(
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Net.Http -ErrorAction SilentlyContinue
 
+# 全局异常捕获：防止窗口一闪而过，确保用户能清晰看到报错信息
+trap {
+    Write-Host "`n========================================================" -ForegroundColor Red
+    Write-Host "[-] 脚本执行出现异常: $_" -ForegroundColor Red
+    if ($_.ScriptStackTrace) {
+        Write-Host $_.ScriptStackTrace -ForegroundColor DarkRed
+    }
+    Write-Host "========================================================" -ForegroundColor Red
+    Write-Host "`n按任意键退出窗口..." -ForegroundColor Yellow
+    try { [void][System.Console]::ReadKey($true) } catch { Read-Host "按回车键退出..." }
+    exit 1
+}
+
 # 智能解析公钥文件路径（支持直接路径、~、相对路径，以及自动定位常见文件名）
 function Resolve-KeyPath {
     param([string]$Path)
@@ -171,19 +184,19 @@ function Install-WinGetPackage {
 Install-WinGetPackage -Id "marlocarlo.psmux" -CommandCheck "tmux"
 Install-WinGetPackage -Id "JanDeDobbeleer.OhMyPosh" -CommandCheck "oh-my-posh"
 
-# 4. 安装 OpenSSH.Server 功能（首选使用 Windows 原生 Add-WindowsCapability，全版本通用稳固安装）
-Write-Host "`n[3/7] 配置 OpenSSH Server 服务功能..." -ForegroundColor Yellow
+# 4. 检查、安装并修复 OpenSSH.Server 服务功能
+Write-Host "`n[3/7] 配置 OpenSSH Server 服务功能与持久化自启..." -ForegroundColor Yellow
 
-$cap = Get-WindowsCapability -Online -Name "OpenSSH.Server~~~~0.0.1.0" -ErrorAction SilentlyContinue
-$isInstalled = ($cap -and $cap.State -eq 'Installed') -or 
-               ((Test-Path "$env:SystemRoot\System32\OpenSSH\sshd.exe") -and (Get-Service sshd -ErrorAction SilentlyContinue))
+$sysSshdExe = "$env:SystemRoot\System32\OpenSSH\sshd.exe"
+$progSshdExe = "C:\Program Files\OpenSSH\sshd.exe"
 
-if ($isInstalled) {
-    Write-Host "[+] OpenSSH.Server 服务已在系统中安装就绪，跳过重复安装" -ForegroundColor Green
-} else {
-    Write-Host "[*] 正在通过 Add-WindowsCapability 安装原生 OpenSSH.Server..." -ForegroundColor Cyan
+# 阶段 1：确保系统上存在 sshd.exe 可执行程序文件
+$hasSshdBin = (Test-Path $sysSshdExe) -or (Test-Path $progSshdExe)
+if (-not $hasSshdBin) {
+    Write-Host "[*] 系统中尚未检测到 sshd 可执行程序，启动系统功能安装..." -ForegroundColor Cyan
+    $installedFoD = $false
 
-    # 临时绕过 WSUS 限制，避免因内网更新服务器缺少 FoD 包导致 0x800F0954 报错或下载挂起
+    # 1. 优先尝试 Windows 原生 Add-WindowsCapability（临时规避 WSUS 限制）
     $auKey = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU"
     $origWUServer = $null
     if (Test-Path $auKey) {
@@ -194,15 +207,15 @@ if ($isInstalled) {
         }
     }
 
-    $installed = $false
     try {
+        Write-Host "[*] 正在通过 Add-WindowsCapability 安装原生 OpenSSH.Server 功能..." -ForegroundColor Cyan
         $result = Add-WindowsCapability -Online -Name "OpenSSH.Server~~~~0.0.1.0" -ErrorAction Stop
-        if ($result.State -eq 'Installed' -or (Test-Path "$env:SystemRoot\System32\OpenSSH\sshd.exe")) {
-            $installed = $true
-            Write-Host "[+] Windows 原生 OpenSSH.Server 安装成功" -ForegroundColor Green
+        if ($result.State -eq 'Installed' -or (Test-Path $sysSshdExe)) {
+            $installedFoD = $true
+            Write-Host "[+] Windows 原生 OpenSSH.Server 功能安装成功" -ForegroundColor Green
         }
     } catch {
-        Write-Warning "[-] Add-WindowsCapability 失败: $_，尝试通过 DISM 在线安装..."
+        Write-Warning "[-] Add-WindowsCapability 失败: $_"
     } finally {
         if ($origWUServer -eq 1) {
             Set-ItemProperty $auKey -Name UseWUServer -Value 1 -Force
@@ -210,54 +223,148 @@ if ($isInstalled) {
         }
     }
 
-    # 兜底方案 1：DISM 在线安装
-    if (-not $installed) {
+    # 2. DISM 在线安装兜底
+    if (-not $installedFoD -and -not (Test-Path $sysSshdExe)) {
+        Write-Host "[*] 尝试通过 DISM 在线添加 OpenSSH.Server 功能..." -ForegroundColor Cyan
         & dism.exe /Online /Add-Capability /CapabilityName:OpenSSH.Server~~~~0.0.1.0 /NoRestart
-        if ($LASTEXITCODE -eq 0 -or (Test-Path "$env:SystemRoot\System32\OpenSSH\sshd.exe")) {
-            $installed = $true
+        if (Test-Path $sysSshdExe) {
+            $installedFoD = $true
             Write-Host "[+] DISM 安装 OpenSSH.Server 成功" -ForegroundColor Green
         }
     }
 
-    # 兜底方案 2：若系统组件库严重损坏无法使用 FoD，从官方 GitHub 下载独立发布包解压并运行 install-sshd.ps1
-    if (-not $installed -and -not (Test-Path "$env:SystemRoot\System32\OpenSSH\sshd.exe")) {
-        Write-Warning "[-] 系统 FoD 组件安装受限，正在回退至 Microsoft 官方 Win32-OpenSSH 独立包..."
+    # 3. 独立发布包兜底（如果系统 FoD 库损坏或网络受限）
+    if (-not $installedFoD -and -not (Test-Path $sysSshdExe) -and -not (Test-Path $progSshdExe)) {
+        Write-Warning "[-] 系统 FoD 功能安装未成功，正在回退至 Microsoft 官方 Win32-OpenSSH 独立包..."
+        $zipArch = if ($isArm64) { "OpenSSH-ARM64.zip" } else { "OpenSSH-Win64.zip" }
+        $tempZip = Join-Path $env:TEMP $zipArch
+        $downloadSuccess = $false
+
+        $githubUrl = "https://github.com/PowerShell/Win32-OpenSSH/releases/download/10.0.0.0p2-Preview/$zipArch"
         try {
-            $zipArch = if ($isArm64) { "OpenSSH-ARM64.zip" } else { "OpenSSH-Win64.zip" }
-            $zipUrl = "https://github.com/PowerShell/Win32-OpenSSH/releases/download/10.0.0.0p2-Preview/$zipArch"
-            $tempZip = Join-Path $env:TEMP $zipArch
-            Invoke-WebRequest -Uri $zipUrl -OutFile $tempZip -UseBasicParsing
+            Write-Host "[*] 正在下载 $githubUrl ..." -ForegroundColor Cyan
+            Invoke-WebRequest -Uri $githubUrl -OutFile $tempZip -UseBasicParsing -TimeoutSec 60
+            $downloadSuccess = $true
+        } catch {
+            Write-Warning "[-] GitHub 下载失败: $_，尝试通过 winget 安装 OpenSSH..."
+        }
+
+        if ($downloadSuccess -and (Test-Path $tempZip)) {
             $progOpenSSH = "C:\Program Files\OpenSSH"
             if (-not (Test-Path $progOpenSSH)) { New-Item -Path $progOpenSSH -ItemType Directory -Force | Out-Null }
             Expand-Archive -Path $tempZip -DestinationPath $env:TEMP -Force
             $extractedFolder = Join-Path $env:TEMP ($zipArch -replace '\.zip$', '')
             Copy-Item -Path "$extractedFolder\*" -Destination $progOpenSSH -Recurse -Force
             Remove-Item $tempZip, $extractedFolder -Recurse -Force -ErrorAction SilentlyContinue
-
-            $installScript = Join-Path $progOpenSSH "install-sshd.ps1"
-            if (Test-Path $installScript) {
-                & powershell.exe -ExecutionPolicy Bypass -File $installScript
-                $installed = $true
+            if (Test-Path "C:\Program Files\OpenSSH\install-sshd.ps1") {
+                & powershell.exe -ExecutionPolicy Bypass -File "C:\Program Files\OpenSSH\install-sshd.ps1"
                 Write-Host "[+] 官方独立版 OpenSSH 部署完成" -ForegroundColor Green
             }
-        } catch {
-            Write-Warning "[-] 独立包下载安装失败: $_"
+        } else {
+            Write-Host "[*] 正在通过 WinGet 部署 OpenSSH..." -ForegroundColor Cyan
+            & winget install --id Microsoft.OpenSSH.Preview -e --source winget --accept-source-agreements --accept-package-agreements 2>&1 | Out-Null
         }
+    }
+} else {
+    Write-Host "[+] 检测到 sshd 程序文件已就绪" -ForegroundColor Green
+}
+
+# 阶段 2：定位实际可用的 sshd.exe 和 ssh-agent.exe 路径
+$activeSshdBin = $null
+$activeAgentBin = $null
+
+if (Test-Path $sysSshdExe) {
+    $activeSshdBin = $sysSshdExe
+    $activeAgentBin = "$env:SystemRoot\System32\OpenSSH\ssh-agent.exe"
+} elseif (Test-Path $progSshdExe) {
+    $activeSshdBin = $progSshdExe
+    $activeAgentBin = "C:\Program Files\OpenSSH\ssh-agent.exe"
+    $progOpenSSH = "C:\Program Files\OpenSSH"
+    if ($env:PATH -notlike "*$progOpenSSH*") {
+        $env:PATH = "$progOpenSSH;$env:PATH"
     }
 }
 
-# 启动并配置 sshd 开机自启，同时配置崩溃自愈
+if (-not $activeSshdBin) {
+    throw "未能在系统中找到可用的 sshd.exe，请检查网络后重新运行构建脚本！"
+}
+
+# 阶段 3：确保 Windows 服务管理器中已正确注册 sshd 与 ssh-agent 服务
+$sshdSvc = Get-Service -Name sshd -ErrorAction SilentlyContinue
+if (-not $sshdSvc) {
+    Write-Host "[*] 检测到 sshd 尚未注册为 Windows 服务，正在立即向系统注册服务..." -ForegroundColor Cyan
+    if (Test-Path "C:\Program Files\OpenSSH\install-sshd.ps1") {
+        & powershell.exe -ExecutionPolicy Bypass -File "C:\Program Files\OpenSSH\install-sshd.ps1" | Out-Null
+    } else {
+        & sc.exe create sshd binPath= "`"$activeSshdBin`"" start= auto DisplayName= "OpenSSH SSH Server" | Out-Null
+        & sc.exe description sshd "SSH protocol based service to provide secure encrypted communications between two untrusted hosts over an insecure network." | Out-Null
+        & sc.exe privs sshd SeAssignPrimaryTokenPrivilege/SeTcbPrivilege/SeBackupPrivilege/SeRestorePrivilege/SeImpersonatePrivilege | Out-Null
+    }
+    $sshdSvc = Get-Service -Name sshd -ErrorAction SilentlyContinue
+}
+
+$agentSvc = Get-Service -Name ssh-agent -ErrorAction SilentlyContinue
+if (-not $agentSvc -and $activeAgentBin -and (Test-Path $activeAgentBin)) {
+    & sc.exe create ssh-agent binPath= "`"$activeAgentBin`"" start= auto DisplayName= "OpenSSH Authentication Agent" | Out-Null
+    & sc.exe description ssh-agent "Agent to hold private keys used for public key authentication." | Out-Null
+    & sc.exe privs ssh-agent SeAssignPrimaryTokenPrivilege/SeTcbPrivilege/SeBackupPrivilege/SeRestorePrivilege/SeImpersonatePrivilege | Out-Null
+    $agentSvc = Get-Service -Name ssh-agent -ErrorAction SilentlyContinue
+}
+
+# 阶段 4：确保主机密钥生成与权限修复（避免因密钥缺失或权限问题导致 sshd 启动失败）
+$progDataSsh = Join-Path $env:ProgramData "ssh"
+if (-not (Test-Path $progDataSsh)) {
+    New-Item -Path $progDataSsh -ItemType Directory -Force | Out-Null
+}
+
+$hostKeys = Get-ChildItem -Path $progDataSsh -Filter "ssh_host_*_key" -ErrorAction SilentlyContinue
+if (-not $hostKeys -or $hostKeys.Count -eq 0) {
+    Write-Host "[*] 检测到主机密钥不存在，正在生成主机密钥 (ssh-keygen -A)..." -ForegroundColor Cyan
+    $keygenExe = if (Test-Path "$env:SystemRoot\System32\OpenSSH\ssh-keygen.exe") {
+        "$env:SystemRoot\System32\OpenSSH\ssh-keygen.exe"
+    } elseif (Test-Path "C:\Program Files\OpenSSH\ssh-keygen.exe") {
+        "C:\Program Files\OpenSSH\ssh-keygen.exe"
+    } else {
+        (Get-Command ssh-keygen.exe -ErrorAction SilentlyContinue).Source
+    }
+    if ($keygenExe) {
+        & $keygenExe -A 2>&1 | Out-Null
+    }
+}
+
+# 严格收紧 %ProgramData%\ssh 与主机私钥 ACL 权限（OpenSSH 强制安全检查）
+try {
+    & icacls "$progDataSsh" /inheritance:r /grant "SYSTEM:(OI)(CI)F" "Administrators:(OI)(CI)F" 2>&1 | Out-Null
+    Get-ChildItem -Path "$progDataSsh\ssh_host_*_key" -ErrorAction SilentlyContinue | ForEach-Object {
+        & icacls $_.FullName /inheritance:r /grant "SYSTEM:F" "Administrators:F" 2>&1 | Out-Null
+    }
+} catch {}
+
+# 阶段 5：配置服务为自动启动、崩溃自愈策略并启动服务
 Set-Service sshd -StartupType Automatic -ErrorAction SilentlyContinue
-sc.exe config sshd start= auto | Out-Null
-sc.exe failure sshd reset= 86400 actions= restart/2000/restart/5000/restart/10000 | Out-Null
+& sc.exe config sshd start= auto | Out-Null
+& sc.exe failure sshd reset= 86400 actions= restart/2000/restart/5000/restart/10000 | Out-Null
+
+Set-Service ssh-agent -StartupType Automatic -ErrorAction SilentlyContinue
+& sc.exe config ssh-agent start= auto | Out-Null
+
+Start-Service ssh-agent -ErrorAction SilentlyContinue
 Start-Service sshd -ErrorAction SilentlyContinue
 
-# 启动并配置 ssh-agent 开机自启
-Set-Service ssh-agent -StartupType Automatic -ErrorAction SilentlyContinue
-sc.exe config ssh-agent start= auto | Out-Null
-Start-Service ssh-agent -ErrorAction SilentlyContinue
+# 阶段 6：启动状态校验与自愈重试
+$currentSshd = Get-Service sshd -ErrorAction SilentlyContinue
+if (-not $currentSshd -or $currentSshd.Status -ne 'Running') {
+    Write-Warning "[-] sshd 尚未处于运行状态，正在进行诊断与重新拉起..."
+    Restart-Service sshd -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 1
+    $currentSshd = Get-Service sshd -ErrorAction SilentlyContinue
+}
 
-Write-Host "[+] sshd 与 ssh-agent 服务已设为开机自动启动并已启动（已配置崩溃自愈）" -ForegroundColor Green
+if ($currentSshd -and $currentSshd.Status -eq 'Running') {
+    Write-Host "[+] sshd 服务已就绪并正常运行 (PID: $((Get-Process sshd -ErrorAction SilentlyContinue).Id | Select-Object -First 1))" -ForegroundColor Green
+} else {
+    Write-Warning "[-] sshd 服务未能成功启动，请在完成后查看控制台诊断信息"
+}
 
 # 5. 配置防火墙入站规则（确保放行所有网络类型：Domain, Private, Public）
 Write-Host "`n[4/7] 配置防火墙 22 端口 (放行所有网络类型: 局域网/公用网络)..." -ForegroundColor Yellow
@@ -366,6 +473,49 @@ $ips = @(
         Select-Object -ExpandProperty IPAddress
 )
 
+# 9. 输出 OpenSSH 服务状态与配置验收报告
+$finalSshd = Get-Service sshd -ErrorAction SilentlyContinue
+$finalAgent = Get-Service "ssh-agent" -ErrorAction SilentlyContinue
+$port22 = Get-NetTCPConnection -LocalPort 22 -State Listen -ErrorAction SilentlyContinue
+
+Write-Host "`n=========================================" -ForegroundColor Cyan
+Write-Host "       OpenSSH 服务状态与配置报告" -ForegroundColor Cyan
+Write-Host "=========================================" -ForegroundColor Cyan
+
+if ($finalSshd) {
+    $statusText = if ($finalSshd.Status -eq 'Running') { "运行中 (Running)" } else { "未运行 ($($finalSshd.Status))" }
+    $statusColor = if ($finalSshd.Status -eq 'Running') { "Green" } else { "Red" }
+    Write-Host "sshd 服务状态 : " -NoNewline
+    Write-Host $statusText -ForegroundColor $statusColor
+
+    $startTypeText = if ($finalSshd.StartType -eq 'Automatic') { "已设为开机自启 (Automatic)" } else { "未设自启 ($($finalSshd.StartType))" }
+    $startTypeColor = if ($finalSshd.StartType -eq 'Automatic') { "Green" } else { "Red" }
+    Write-Host "sshd 启动类型 : " -NoNewline
+    Write-Host $startTypeText -ForegroundColor $startTypeColor
+
+    Write-Host "sshd 程序路径 : $($finalSshd.BinaryPathName)" -ForegroundColor Gray
+} else {
+    Write-Host "sshd 服务状态 : " -NoNewline
+    Write-Host "未检测到 sshd 服务！请检查系统组件" -ForegroundColor Red
+}
+
+if ($finalAgent) {
+    Write-Host "ssh-agent状态 : " -NoNewline
+    Write-Host "$($finalAgent.Status) (启动类型: $($finalAgent.StartType))" -ForegroundColor Gray
+}
+
+Write-Host "TCP 22 端口   : " -NoNewline
+if ($port22) {
+    Write-Host "已正常监听 (TCP 22)" -ForegroundColor Green
+} else {
+    Write-Host "未处于监听状态（若刚启动可能需稍等 1-2 秒）" -ForegroundColor Yellow
+}
+
+$defaultShell = (Get-ItemProperty 'HKLM:\SOFTWARE\OpenSSH' -Name 'DefaultShell' -ErrorAction SilentlyContinue).DefaultShell
+if ($defaultShell) {
+    Write-Host "登录默认Shell : $defaultShell" -ForegroundColor Cyan
+}
+
 Write-Host "`n=========================================" -ForegroundColor Cyan
 Write-Host "            配置构建全部完成！" -ForegroundColor Green
 Write-Host "=========================================" -ForegroundColor Cyan
@@ -374,4 +524,13 @@ foreach ($ip in $ips) {
     Write-Host "  ssh $env:USERNAME@$ip" -ForegroundColor Yellow
 }
 Write-Host "-----------------------------------------" -ForegroundColor Gray
-Write-Host "提示：若机器重启后尚未登录物理桌面，连入将自动降级并安全启动独立 Tmux 会话，绝不中断。" -ForegroundColor Gray
+Write-Host "提示：若机器刚重启尚未登录物理桌面，连入将自动安全启动独立 Tmux 会话，绝不中断。" -ForegroundColor Gray
+
+Write-Host "`n=========================================" -ForegroundColor Cyan
+Write-Host "  配置已全部就绪，请按任意键退出窗口..." -ForegroundColor Yellow
+Write-Host "=========================================" -ForegroundColor Cyan
+try {
+    [void][System.Console]::ReadKey($true)
+} catch {
+    Read-Host "按回车键退出..."
+}
