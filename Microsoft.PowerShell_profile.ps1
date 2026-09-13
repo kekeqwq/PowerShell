@@ -1,4 +1,4 @@
-# scp / sftp / ssh host <command>：非交互式调用整文件立即退出，禁止任何输出
+﻿# scp / sftp / ssh host <command>：非交互式调用整文件立即退出，禁止任何输出
 if ($env:SSH_ORIGINAL_COMMAND) { return }
 
 $argv = [Environment]::GetCommandLineArgs()
