@@ -8,6 +8,7 @@ if (($argv | Where-Object { $_ -in '-Command', '-c', '/c', '-File' }) -and ($arg
 
 $env:TERM = 'xterm-256color'
 $env:PSMUX_FORCE_MOUSE = '0'
+$env:PSMUX_NO_WARM = '1'
 
 # 关闭终端可能残留的鼠标跟踪模式，防止 ConPTY 漏码产生类似 35;xx;xxM 的字符（仅在交互式会话中输出）
 if ($Host.UI.RawUI) {
@@ -56,6 +57,19 @@ function Test-TmuxLastTerminalPane {
     }
 }
 
+if ($env:TMUX) {
+    Register-EngineEvent PowerShell.Exiting -Action {
+        if (Test-TmuxLastTerminalPane) {
+            $sessions = @(& tmux list-sessions 2>&1 | Where-Object { $_ -and $_ -is [string] -and $_.Trim() })
+            if ($sessions.Count -le 1) {
+                & tmux kill-server 2>$null | Out-Null
+            } else {
+                & tmux kill-session 2>$null | Out-Null
+            }
+        }
+    } | Out-Null
+}
+
 Set-PSReadLineKeyHandler -Chord Ctrl+d -ScriptBlock {
     $line = $null
     $cursor = $null
@@ -65,7 +79,12 @@ Set-PSReadLineKeyHandler -Chord Ctrl+d -ScriptBlock {
         return
     }
     if ($env:TMUX -and (Test-TmuxLastTerminalPane)) {
-        & tmux kill-session 2>$null | Out-Null
+        $sessions = @(& tmux list-sessions 2>&1 | Where-Object { $_ -and $_ -is [string] -and $_.Trim() })
+        if ($sessions.Count -le 1) {
+            & tmux kill-server 2>$null | Out-Null
+        } else {
+            & tmux kill-session 2>$null | Out-Null
+        }
     }
     [Microsoft.PowerShell.PSConsoleReadLine]::RevertLine()
     [Microsoft.PowerShell.PSConsoleReadLine]::Insert('exit')

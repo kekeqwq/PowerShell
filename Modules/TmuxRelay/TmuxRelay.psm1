@@ -76,7 +76,7 @@ function Install-TmuxRelayTask {
     $tmux    = Get-TmuxPath
     $user    = "$env:COMPUTERNAME\$env:USERNAME"
     $homeDir = $HOME
-    $arg     = "-NoProfile -WindowStyle Hidden -Command `"Set-Location '$homeDir'; `$env:TERM = 'xterm-256color'; & '$tmux' new-session -d -s $Session '$pwsh'`""
+    $arg     = "-NoProfile -WindowStyle Hidden -Command `"Set-Location '$homeDir'; `$env:PSMUX_NO_WARM = '1'; `$env:TERM = 'xterm-256color'; & '$tmux' new-session -d -s $Session '$pwsh'`""
 
     $existing = Get-ScheduledTask -TaskName $script:TaskName -ErrorAction SilentlyContinue
     if ($existing) {
@@ -120,8 +120,20 @@ function Enter-TmuxRelay {
         }
     }
 
+    $tmuxBin = Get-TmuxPath
     $env:TERM = 'xterm-256color'
-    & (Get-TmuxPath) attach-session -t $Session
+    & $tmuxBin attach-session -t $Session
+
+    # 区分 detach 与真正退出会话：
+    # - 若该会话仍存活（用户按 Prefix+d / detach-client 分离），保留会话与 server 等待后续 attach
+    # - 若该会话已不存在（用户在内部退出 / 销毁会话），杀死 tmux-server 清理残留进程
+    if (-not (Get-TmuxAlive $Session)) {
+        $remaining = @(& $tmuxBin list-sessions 2>$null | Where-Object { $_ -and $_ -is [string] -and $_.Trim() })
+        if ($remaining.Count -eq 0) {
+            & $tmuxBin kill-server 2>$null
+        }
+    }
+
     # 退出 tmux 会话时，顺带关闭外层 SSH 外壳
     exit
 }
