@@ -12,7 +12,7 @@ $env:PSMUX_NO_WARM = '1'
 
 # 关闭终端可能残留的鼠标跟踪模式，防止 ConPTY 漏码产生类似 35;xx;xxM 的字符（仅在交互式会话中输出）
 if ($Host.UI.RawUI) {
-    [Console]::Write("`e[?1000l`e[?1002l`e[?1003l`e[?1006l")
+    [Console]::Write("`e[?1000l`e[?1002l`e[?1003l`e[?1005l`e[?1006l`e[?1015l")
 }
 
 # 1. 快速注入 tmux 原生路径
