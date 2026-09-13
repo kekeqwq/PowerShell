@@ -1,4 +1,4 @@
-﻿# scp / sftp / ssh host <command>：非交互式调用整文件立即退出，禁止任何输出
+# scp / sftp / ssh host <command>：非交互式调用整文件立即退出，禁止任何输出
 if ($env:SSH_ORIGINAL_COMMAND) { return }
 
 $argv = [Environment]::GetCommandLineArgs()
@@ -7,8 +7,12 @@ if (($argv | Where-Object { $_ -in '-Command', '-c', '/c', '-File' }) -and ($arg
 }
 
 $env:TERM = 'xterm-256color'
-$env:PSMUX_FORCE_MOUSE = '1'
+$env:PSMUX_FORCE_MOUSE = '0'
 
+# 关闭终端可能残留的鼠标跟踪模式，防止 ConPTY 漏码产生类似 35;xx;xxM 的字符（仅在交互式会话中输出）
+if ($Host.UI.RawUI) {
+    [Console]::Write("`e[?1000l`e[?1002l`e[?1003l`e[?1006l")
+}
 
 # 1. 快速注入 tmux 原生路径
 $knownTmuxDir = Join-Path $env:LOCALAPPDATA 'Microsoft\WinGet\Packages\marlocarlo.psmux_Microsoft.Winget.Source_8wekyb3d8bbwe'
